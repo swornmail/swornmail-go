@@ -38,3 +38,6 @@ See `SECURITY.md`. Report privately to security@swornmail.dev.
 ## License
 
 Apache-2.0 (see `LICENSE`).
+
+Maintained by [PlatOps Security, LLC](https://platops.com). Copyright:
+see `NOTICE`.
