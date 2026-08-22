@@ -20,7 +20,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"net/netip"
@@ -165,45 +164,6 @@ func goodProt() cose.ProtectedHeader {
 // signRaw signs an arbitrary payload with the valid protected header.
 func signRaw(entries ...kv) []byte {
 	return signWith(buildMap(entries...), goodProt(), nil)
-}
-
-// --- result mapping ---
-
-func reason(err error) string {
-	switch {
-	case err == nil:
-		return "pass"
-	case errors.Is(err, sworn.ErrIneligibleSrc):
-		return "ineligible_source"
-	case errors.Is(err, sworn.ErrOffPrefix):
-		return "off_prefix"
-	case errors.Is(err, sworn.ErrExpired):
-		return "expired"
-	case errors.Is(err, sworn.ErrNotYetValid):
-		return "not_yet_valid"
-	case errors.Is(err, sworn.ErrBadSignature):
-		return "bad_signature"
-	case errors.Is(err, sworn.ErrLifetimeTooLong):
-		return "lifetime_too_long"
-	case errors.Is(err, sworn.ErrBadUnit):
-		return "bad_unit"
-	case errors.Is(err, sworn.ErrBadPrefix):
-		return "bad_prefix"
-	case errors.Is(err, sworn.ErrBadValidity):
-		return "bad_validity"
-	case errors.Is(err, sworn.ErrContentType):
-		return "bad_content_type"
-	case errors.Is(err, sworn.ErrNoSelector):
-		return "bad_kid"
-	case errors.Is(err, sworn.ErrHeaderConfusion):
-		return "header_confusion"
-	case errors.Is(err, sworn.ErrBadRole):
-		return "bad_role"
-	case errors.Is(err, sworn.ErrMalformed):
-		return "malformed"
-	default:
-		return "error:" + err.Error()
-	}
 }
 
 func main() {
@@ -451,7 +411,7 @@ func main() {
 			continue
 		}
 		res, verr := sworn.Verify(c.token, pub, src, time.Unix(c.now, 0).UTC())
-		got := reason(verr)
+		got := sworn.Reason(verr)
 		ok := got == c.expect
 		for _, e := range c.expectAny {
 			if got == e {

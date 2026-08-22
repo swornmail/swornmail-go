@@ -117,6 +117,37 @@ func ParseRecord(txt string) (Record, error) {
 	return rec, nil
 }
 
+// ParsePointerRecord parses a reverse-tree pointer record
+// (`_sworn.<nibbles>.ip6.arpa`), per I-D -01 §Discovery step 1:
+//
+//	v=SWORN1; d=<operator domain>
+//
+// It returns the operator domain, which MUST satisfy the operator-domain
+// syntax of {{token}}. The named domain is still subject to step-3
+// confirmation by the caller.
+func ParsePointerRecord(txt string) (string, error) {
+	pairs, err := splitTags(txt)
+	if err != nil {
+		return "", err
+	}
+	var version, domain string
+	for _, kv := range pairs {
+		switch kv[0] {
+		case "v":
+			if kv[1] != Version {
+				return "", ErrRecordVersion
+			}
+			version = kv[1]
+		case "d":
+			domain = kv[1]
+		}
+	}
+	if version == "" || domain == "" || !ValidDomain(domain) {
+		return "", ErrRecordSyntax
+	}
+	return domain, nil
+}
+
 // ParsePolicyRecord parses a _prefixes._sworn policy record.
 func ParsePolicyRecord(txt string) (PolicyRecord, error) {
 	pairs, err := splitTags(txt)

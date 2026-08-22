@@ -174,12 +174,13 @@ func eligibleSource(a netip.Addr) bool {
 	return true
 }
 
-// validDomain enforces the -01 operator-domain syntax: A-label form, total
+// ValidDomain enforces the -01 operator-domain syntax: A-label form, total
 // length <= 253, each label 1..63 octets of LDH not beginning/ending with
 // '-'. This rejects empty labels, NUL, CR/LF (Authentication-Results header
 // injection), wildcards, and U-labels before any value reaches a resolver or
-// a log line.
-func validDomain(s string) bool {
+// a log line. Exported for Mode-1 discovery, which applies the same rule to a
+// reverse-tree pointer's d= value.
+func ValidDomain(s string) bool {
 	if len(s) < 1 || len(s) > 253 {
 		return false
 	}
@@ -271,7 +272,7 @@ func decodePayload(b []byte) (Payload, error) {
 			return Payload{}, ErrMalformed
 		}
 	}
-	if !validDomain(p.Operator) {
+	if !ValidDomain(p.Operator) {
 		return Payload{}, ErrMalformed
 	}
 	if iat < 0 || exp < 0 {
