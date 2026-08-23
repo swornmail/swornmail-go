@@ -389,6 +389,18 @@ func protectedHeaders(msg *cose.Sign1Message) (string, error) {
 	return string(b), nil
 }
 
+// ValidSelector reports whether s is a usable selector under the -01 kid
+// syntax. Exported so sender-side tooling rejects an unpublishable selector
+// at generation time using the same rule the verifier applies to kid.
+func ValidSelector(s string) bool { return validSelector([]byte(s)) }
+
+// ValidatePrefix reports whether p is attestable under -01 §canon:
+// masked-canonical, within 2000::/3, length 32..64, not overlapping Teredo
+// or 6to4. Exported so record generators reject a prefix before it is
+// published, using the verifier's own rule rather than a restatement of it.
+// Returns ErrBadPrefix on any violation.
+func ValidatePrefix(p netip.Prefix) error { return validatePrefix(p) }
+
 // validSelector enforces the -01 kid syntax: a single DNS label, 1..63
 // octets of LDH, not beginning or ending with '-'.
 func validSelector(b []byte) bool {

@@ -16,8 +16,10 @@ attestation for email senders.
 - **Mode-1 discovery** (`sworn/discover`): DNS-only discovery — reverse-tree
   pointer then forward-confirmed PTR candidates, bounded by a 10-query
   budget, with an injectable resolver for tests.
-- **CLI** (`cmd/sworn`): `verify` a token, `record` lint a domain, `discover`
-  a source address.
+- **CLI** (`cmd/sworn`): sender side — `keygen` a signing key, `genrecord` the
+  DNS records (validating every `-01` constraint and round-tripping the output
+  through the protocol's own parsers), `sign` a Mode-2 token; receiver side —
+  `verify` a token, `record` lint a domain, `discover` a source address.
 - **Postfix milter** (`cmd/sworn-milter`): runs Mode-1 discovery per
   connection and stamps `Authentication-Results: sworn=…`, stripping inbound
   results at the trust boundary. Strictly fail-open — never rejects mail.
@@ -33,14 +35,52 @@ anti-replay state exists.
 
 ## Planned
 
-rspamd module (first receiver-side integration) · token signing helpers.
-Further items in the issues and `spec` #2.
+rspamd module (first receiver-side integration). Further items in the issues
+and `spec` #2.
+
+## Deploy SwornMail in 5 minutes
+
+You need a domain, the IPv6 prefix your mail leaves from, and the ability to
+add two TXT records.
+
+```
+go build -o sworn ./cmd/sworn
+
+# 1. Generate a signing key. Writes 2026a.key (mode 0600) — back it up.
+./sworn keygen
+
+# 2. Generate the records for your domain and prefix.
+./sworn genrecord --domain mailer.example.com --selector 2026a \
+                  --key 2026a.key --prefix 2001:db8:f00::/48
+
+# 3. Publish the two TXT records it prints (zone-file and DNS-panel forms
+#    are both shown), then check them:
+./sworn record mailer.example.com --selector 2026a
+./sworn discover --ip <one of your MTA's IPv6 addresses>     # → sworn=pass
+```
+
+Step 2 defaults to `t=y`, testing mode: receivers verify exactly as they
+would otherwise but report `sworn=none policy.testing=y` and stake no
+reputation on you, good or bad. Watch your traffic, then re-run with
+`--testing=false` when you are ready to be accountable for the prefix.
+
+That is the whole Mode-1 deployment. Mode 2 additionally signs a token per
+connection; `sworn sign` issues one so you can prove the key works:
+
+```
+TOKEN=$(./sworn sign --key 2026a.key --selector 2026a \
+                     --domain mailer.example.com --prefix 2001:db8:f00::/48)
+./sworn verify "$TOKEN" --ip 2001:db8:f00::25       # fetches your key record
+```
 
 ## Use
 
 ```
 go test ./...
 go run ./cmd/genvectors               # regenerate the deterministic vectors
+go run ./cmd/sworn keygen --selector 2026a
+go run ./cmd/sworn genrecord --domain example.com --selector 2026a --key 2026a.key --prefix <p>
+go run ./cmd/sworn sign --key 2026a.key --selector 2026a --domain example.com --prefix <p>
 go run ./cmd/sworn verify <token> --ip <addr> --key <b64>
 go run ./cmd/sworn record example.com --selector 2026a
 go run ./cmd/sworn discover --ip <addr>

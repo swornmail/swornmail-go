@@ -29,6 +29,14 @@ const MaxQueries = 10
 
 const hexDigits = "0123456789abcdef"
 
+// ReverseName returns the reverse-tree query name for the enclosing prefix of
+// length prefixLen, or ok=false when the address or length is one discovery
+// never queries. Exported so record generators emit a pointer at a name
+// discovery actually asks for — step 1 queries only the enclosing /64 and /48.
+func ReverseName(a netip.Addr, prefixLen int) (string, bool) {
+	return reverseNibbleName(a, prefixLen)
+}
+
 // reverseNibbleName builds the reverse-tree query name for the enclosing
 // prefix of length prefixLen (a multiple of 4, i.e. /48 or /64), with the
 // `_sworn` label leftmost so the name falls inside the operator's reverse

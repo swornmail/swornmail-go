@@ -32,6 +32,12 @@ func main() {
 		os.Exit(cmdRecord(os.Args[2:]))
 	case "discover":
 		os.Exit(cmdDiscover(os.Args[2:]))
+	case "keygen":
+		os.Exit(cmdKeygen(os.Args[2:]))
+	case "genrecord":
+		os.Exit(cmdGenrecord(os.Args[2:]))
+	case "sign":
+		os.Exit(cmdSign(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -44,7 +50,20 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `sworn — SwornMail protocol CLI
 
-usage:
+sender (set up a domain):
+  sworn keygen [--selector <sel>] [--out <dir>] [--force]
+      Generate an Ed25519 signing key. Writes <selector>.key with owner-only
+      permissions and prints the public key.
+  sworn genrecord --domain <d> --selector <sel> --key <file|b64> --prefix <p>
+                  [--prefix <p>...] [--unit N] [--testing=false] [--rua mailto:<addr>]
+      Emit the key and policy TXT records, in zone-file and DNS-panel form.
+      Validates every -01 constraint first; publishes t=y (observe-only)
+      unless --testing=false.
+  sworn sign --key <file> --selector <sel> --domain <d> --prefix <p>
+             [--unit N] [--role mta|esp-tenant|forwarder] [--lifetime 1h]
+      Sign a Mode-2 token — for proving a key works, and for demos.
+
+receiver (check a sender):
   sworn verify <token-b64url> --ip <addr> [--key <b64>] [--json]
       Verify a Mode-2 token against a connecting source address. Without
       --key, the operator key is fetched from DNS using the token's kid and

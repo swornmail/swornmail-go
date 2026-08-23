@@ -87,7 +87,9 @@ func lintKey(selector, domain string) *keyLint {
 		return out
 	}
 	out.Algorithm = parsed.Algorithm
-	out.PublicKey = fmt.Sprintf("%x", []byte(parsed.PublicKey))
+	// Same encoding the pk= tag and `sworn keygen` use, so an operator can
+	// compare what is published against the key they hold.
+	out.PublicKey = encodePublicKey(parsed.PublicKey)
 	return out
 }
 
