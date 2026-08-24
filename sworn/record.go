@@ -46,6 +46,7 @@ var (
 	ErrRecordUnitInvalid = errors.New("sworn: invalid unit value")
 	ErrRecordDupTag      = errors.New("sworn: duplicate record tag")
 	ErrRecordPrefix      = errors.New("sworn: invalid or out-of-range prefix")
+	ErrRecordRUA         = errors.New("sworn: rua must be a non-empty mailto: address")
 )
 
 // splitTags splits a record into (key, value) pairs, enforcing the shared
@@ -54,7 +55,7 @@ var (
 func splitTags(txt string) ([][2]string, error) {
 	var pairs [][2]string
 	seen := map[string]bool{}
-	for i, part := range strings.Split(txt, ";") {
+	for _, part := range strings.Split(txt, ";") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -64,7 +65,10 @@ func splitTags(txt string) ([][2]string, error) {
 			return nil, ErrRecordSyntax
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if i == 0 && k != "v" {
+		// v= must be the first tag present. Counting position among the
+		// emitted tags rather than among the raw segments is what makes a
+		// leading ";" or an empty segment unable to smuggle a tag ahead of it.
+		if len(pairs) == 0 && k != "v" {
 			return nil, ErrRecordSyntax
 		}
 		if strings.ContainsAny(v, " \t") {
@@ -190,6 +194,15 @@ func ParsePolicyRecord(txt string) (PolicyRecord, error) {
 				}
 			}
 		case "rua":
+			// Only the mailto: scheme is defined. rua names a destination
+			// receivers send aggregate reports to, so anything else is
+			// rejected here rather than left for a report sender to
+			// interpret — a parser that accepts an arbitrary URI hands its
+			// consumers an attacker-chosen target.
+			addr, ok := strings.CutPrefix(v, "mailto:")
+			if !ok || addr == "" {
+				return PolicyRecord{}, ErrRecordRUA
+			}
 			rec.RUA = v
 		}
 	}

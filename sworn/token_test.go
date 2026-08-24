@@ -263,11 +263,30 @@ func TestPolicyRecordRejects(t *testing.T) {
 		"duplicate tag":    "v=SWORN1; u=64; u=48",
 		"prefix too short": "v=SWORN1; p=2001:db8::/16",
 		"v not first":      "u=64; v=SWORN1",
+		// An empty leading segment must not let a tag precede v=.
+		"v not first behind a leading semicolon": ";u=64; v=SWORN1",
+		"v not first behind several":             ";;; p=2001:db8:f00::/48; v=SWORN1",
+		// rua names where receivers send reports: only mailto: is defined, so
+		// another scheme must not survive parsing.
+		"rua with a non-mail scheme": "v=SWORN1; rua=https://evil.example/collect",
+		"rua empty":                  "v=SWORN1; rua=",
+		"rua scheme only":            "v=SWORN1; rua=mailto:",
 	}
 	for name, txt := range bad {
 		if _, err := ParsePolicyRecord(txt); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// A leading empty segment is not itself an error — v= is still the first tag.
+func TestPolicyRecordAllowsLeadingSemicolon(t *testing.T) {
+	rec, err := ParsePolicyRecord(";v=SWORN1; p=2001:db8:f00::/48")
+	if err != nil {
+		t.Fatalf("ParsePolicyRecord: %v", err)
+	}
+	if len(rec.Prefixes) != 1 {
+		t.Errorf("parsed %d prefixes, want 1", len(rec.Prefixes))
 	}
 }
 
