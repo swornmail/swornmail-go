@@ -85,6 +85,31 @@ func TestReverseTreeHit(t *testing.T) {
 	if res.Operator != "mailer.example.com" || res.Mode != "dns" || res.Unit != wantUnit {
 		t.Errorf("result = %+v", res)
 	}
+	// The attested prefix is reported alongside the unit: they differ, and a
+	// caller recording accountability needs the prefix the operator staked.
+	if res.Prefix.String() != "2001:db8:f00::/48" {
+		t.Errorf("attested prefix = %s, want 2001:db8:f00::/48", res.Prefix)
+	}
+}
+
+// Where several enumerated prefixes cover the source, the reported prefix is
+// the longest match — the same precedence receivers apply.
+func TestLongestMatchingPrefixIsReported(t *testing.T) {
+	f := &fakeResolver{
+		txt: map[string][]string{
+			rev64: {"v=SWORN1; d=mailer.example.com"},
+			"_prefixes._sworn.mailer.example.com": {
+				"v=SWORN1; p=2001:db8::/32,2001:db8:f00::/48,2001:db8:f00:1234::/64; u=64",
+			},
+		},
+	}
+	res, err := discover(t, f)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if res.Prefix.String() != "2001:db8:f00:1234::/64" {
+		t.Errorf("attested prefix = %s, want the longest match", res.Prefix)
+	}
 }
 
 // t=y must survive discovery so the caller can report it; the walk itself is
