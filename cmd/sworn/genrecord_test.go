@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"net/netip"
 	"strings"
 	"testing"
@@ -216,6 +218,50 @@ func TestNotesWarnOnCoarseUnitAndShortPrefix(t *testing.T) {
 	for _, want := range []string{"coarser than", "shorter than /48", "observe-only"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("notes missing %q:\n%s", want, all)
+		}
+	}
+}
+
+// The JSON form is what a DNS provider's API is driven from, so it must carry
+// every record with the fields such an API asks for.
+func TestPrintRecordSetJSON(t *testing.T) {
+	pub := testKey(t)
+	o := baseOptions(pub)
+	o.Prefixes[0] = netip.MustParsePrefix("2001:db8:f00::/48")
+	rs, err := buildRecords(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if code := printRecordSetJSON(&buf, rs); code != 0 {
+		t.Fatalf("exit code %d", code)
+	}
+	var got recordSetJSON
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if got.Domain != o.Domain || len(got.Records) != 3 {
+		t.Fatalf("domain=%q, %d records", got.Domain, len(got.Records))
+	}
+	byRole := map[string]jsonRecord{}
+	for _, r := range got.Records {
+		byRole[r.Role] = r
+		if r.Type != "TXT" || r.TTL != recordTTL {
+			t.Errorf("%s: type=%q ttl=%d", r.Role, r.Type, r.TTL)
+		}
+		if strings.Join(r.Strings, "") != r.Value {
+			t.Errorf("%s: character-strings do not reassemble to the value", r.Role)
+		}
+	}
+	if byRole["key"].Value != rs.Key.Value || byRole["policy"].Value != rs.Policy.Value {
+		t.Error("JSON values differ from the printed records")
+	}
+	if byRole["key"].Name != "2026a._sworn" || !byRole["policy"].Required || byRole["pointer"].Required {
+		t.Error("record naming or required flags wrong")
+	}
+	for _, n := range got.Notes {
+		if strings.Contains(n, "\n") {
+			t.Errorf("note not flattened for JSON: %q", n)
 		}
 	}
 }

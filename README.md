@@ -80,6 +80,7 @@ go test ./...
 go run ./cmd/genvectors               # regenerate the deterministic vectors
 go run ./cmd/sworn keygen --selector 2026a
 go run ./cmd/sworn genrecord --domain example.com --selector 2026a --key 2026a.key --prefix <p>
+go run ./cmd/sworn genrecord ... --json    # feed a DNS provider's API
 go run ./cmd/sworn sign --key 2026a.key --selector 2026a --domain example.com --prefix <p>
 go run ./cmd/sworn verify <token> --ip <addr> --key <b64>
 go run ./cmd/sworn record example.com --selector 2026a

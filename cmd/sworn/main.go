@@ -55,8 +55,9 @@ sender (set up a domain):
       Generate an Ed25519 signing key. Writes <selector>.key with owner-only
       permissions and prints the public key.
   sworn genrecord --domain <d> --selector <sel> --key <file|b64> --prefix <p>
-                  [--prefix <p>...] [--unit N] [--testing=false] [--rua mailto:<addr>]
-      Emit the key and policy TXT records, in zone-file and DNS-panel form.
+                  [--prefix <p>...] [--unit N] [--testing=false] [--rua mailto:<addr>] [--json]
+      Emit the key and policy TXT records, in zone-file and DNS-panel form
+      (--json for feeding a DNS provider's API).
       Validates every -01 constraint first; publishes t=y (observe-only)
       unless --testing=false.
   sworn sign --key <file> --selector <sel> --domain <d> --prefix <p>

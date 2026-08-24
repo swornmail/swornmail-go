@@ -47,6 +47,7 @@ func cmdGenrecord(args []string) int {
 	unit := fs.Int("unit", sworn.DefaultUnitPrefixLen, "reputation unit prefix length, 1-64")
 	testing := fs.Bool("testing", true, "publish t=y, observe-only; --testing=false stakes reputation")
 	rua := fs.String("rua", "", "aggregate report destination, mailto:<mailbox>@<domain>")
+	asJSON := fs.Bool("json", false, "JSON output, for driving a DNS provider's API")
 	var prefixArgs stringList
 	fs.Var(&prefixArgs, "prefix", "attested IPv6 prefix (repeat the flag, or comma-separate)")
 	if err := fs.Parse(args); err != nil {
@@ -54,7 +55,7 @@ func cmdGenrecord(args []string) int {
 	}
 	if *domain == "" || *selector == "" || *key == "" || len(prefixArgs) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: sworn genrecord --domain <d> --selector <sel> --key <file|b64> --prefix <p> [--prefix <p>...]")
-		fmt.Fprintln(os.Stderr, "       [--unit N] [--testing=false] [--rua mailto:<addr>]")
+		fmt.Fprintln(os.Stderr, "       [--unit N] [--testing=false] [--rua mailto:<addr>] [--json]")
 		return 2
 	}
 
@@ -75,6 +76,9 @@ func cmdGenrecord(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sworn:", err)
 		return 2
+	}
+	if *asJSON {
+		return printRecordSetJSON(os.Stdout, rs)
 	}
 	printRecordSet(os.Stdout, rs)
 	return 0
