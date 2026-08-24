@@ -15,6 +15,10 @@ type Result struct {
 	Operator string       // confirmed accountable operator domain
 	Unit     netip.Prefix // source masked to the operator's declared unit
 	Mode     string       // always "dns" for Mode 1
+	// Testing reports the operator's t=y flag. Discovery itself is
+	// unaffected; reporting is not. Callers MUST NOT stake reputation on a
+	// testing operator, for credit or blame — see AuthResults.
+	Testing bool
 }
 
 // Outcome sentinels. ErrNone maps to sworn=none (no confirming operator),
@@ -152,7 +156,7 @@ func (d *discovery) confirm(domain string, source netip.Addr) (Result, bool, err
 	if err != nil {
 		return Result{}, false, nil
 	}
-	return Result{Operator: domain, Unit: unit, Mode: "dns"}, true, nil
+	return Result{Operator: domain, Unit: unit, Mode: "dns", Testing: policy.Testing}, true, nil
 }
 
 // forwardConfirm implements FCrDNS (iprev): the PTR hostname must resolve back

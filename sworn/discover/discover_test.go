@@ -87,6 +87,34 @@ func TestReverseTreeHit(t *testing.T) {
 	}
 }
 
+// t=y must survive discovery so the caller can report it; the walk itself is
+// unaffected — a testing operator still confirms.
+func TestTestingFlagPropagates(t *testing.T) {
+	for name, tc := range map[string]struct {
+		policy string
+		want   bool
+	}{
+		"testing":         {"v=SWORN1; p=2001:db8:f00::/48; u=64; t=y", true},
+		"not testing":     {policyTXT, false},
+		"unknown flag":    {"v=SWORN1; p=2001:db8:f00::/48; u=64; t=x", false},
+		"flag list has y": {"v=SWORN1; p=2001:db8:f00::/48; u=64; t=x:y", true},
+	} {
+		f := &fakeResolver{
+			txt: map[string][]string{
+				rev64:                                 {"v=SWORN1; d=mailer.example.com"},
+				"_prefixes._sworn.mailer.example.com": {tc.policy},
+			},
+		}
+		res, err := discover(t, f)
+		if err != nil {
+			t.Fatalf("%s: Discover: %v", name, err)
+		}
+		if res.Testing != tc.want {
+			t.Errorf("%s: Testing = %t, want %t", name, res.Testing, tc.want)
+		}
+	}
+}
+
 func TestReverseTreeLongestFirst(t *testing.T) {
 	// Both /64 and /48 pointers exist; the more specific /64 must win.
 	f := &fakeResolver{

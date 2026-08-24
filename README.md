@@ -22,8 +22,10 @@ attestation for email senders.
   `verify` a token, `record` lint a domain, `discover` a source address.
 - **Postfix milter** (`cmd/sworn-milter`): runs Mode-1 discovery per
   connection and stamps `Authentication-Results: sworn=…`, stripping inbound
-  results at the trust boundary. Strictly fail-open — never rejects mail.
-  (Uses `github.com/emersion/go-milter`.)
+  results at the trust boundary. Honors `t=y` — a testing operator is
+  reported `sworn=none policy.testing=y policy.wouldbe=pass`, never `pass`,
+  so no reputation is staked on a deployment that has not opted in. Strictly
+  fail-open — never rejects mail. (Uses `github.com/emersion/go-milter`.)
 - **Cross-implementation test vectors** (`cmd/genvectors` → `spec/test-vectors/v1.json`):
   expectations authored from the draft; generation self-checks the reference
   and fails on any disagreement. The [Rust verifier](https://github.com/swornmail/swornmail)
@@ -56,13 +58,17 @@ go build -o sworn ./cmd/sworn
 # 3. Publish the two TXT records it prints (zone-file and DNS-panel forms
 #    are both shown), then check them:
 ./sworn record mailer.example.com --selector 2026a
-./sworn discover --ip <one of your MTA's IPv6 addresses>     # → sworn=pass
+./sworn discover --ip <one of your MTA's IPv6 addresses>
+# → sworn=none testing=y wouldbe=pass mode=dns op=mailer.example.com …
 ```
 
-Step 2 defaults to `t=y`, testing mode: receivers verify exactly as they
-would otherwise but report `sworn=none policy.testing=y` and stake no
-reputation on you, good or bad. Watch your traffic, then re-run with
-`--testing=false` when you are ready to be accountable for the prefix.
+`wouldbe=pass` is success: your records are correct and discovery found you.
+
+Step 2 defaults to `t=y`, testing mode, so receivers verify exactly as they
+otherwise would but report `sworn=none policy.testing=y policy.wouldbe=pass`
+and stake no reputation on you — neither credit nor blame. Watch your traffic,
+then re-run `genrecord` with `--testing=false` and republish when you are
+ready to be accountable for the prefix; discovery then reports `sworn=pass`.
 
 That is the whole Mode-1 deployment. Mode 2 additionally signs a token per
 connection; `sworn sign` issues one so you can prove the key works:

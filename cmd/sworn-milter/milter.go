@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -63,26 +61,12 @@ func (s *swornMilter) Body(m *milter.Modifier) (milter.Response, error) {
 // evaluate runs discovery for the captured source and formats the AR value.
 func (s *swornMilter) evaluate() string {
 	if !s.haveSource {
-		return s.authservID + "; sworn=none"
+		return discover.AuthResults(s.authservID, discover.Result{}, discover.ErrNone)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.dnsTimeout)
 	defer cancel()
 	res, err := discover.Discover(ctx, s.resolver, s.source, discover.Options{})
-	return arValue(s.authservID, res, err)
-}
-
-// arValue formats an Authentication-Results value from a discovery outcome.
-// A pvalue containing ':' or '/' (the unit prefix) is quoted per RFC 8601.
-func arValue(authservID string, res discover.Result, err error) string {
-	switch {
-	case err == nil:
-		return fmt.Sprintf("%s; sworn=pass policy.mode=%s policy.op=%s policy.unit=%q",
-			authservID, res.Mode, res.Operator, res.Unit.String())
-	case errors.Is(err, discover.ErrTemp):
-		return authservID + "; sworn=temperror"
-	default: // ErrNone: no attestation, ineligible source, or IPv4
-		return authservID + "; sworn=none"
-	}
+	return discover.AuthResults(s.authservID, res, err)
 }
 
 // authservIDOf returns the authserv-id (the token before the first ';') of an

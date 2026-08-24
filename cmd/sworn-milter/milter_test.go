@@ -54,6 +54,20 @@ func TestEvaluatePass(t *testing.T) {
 	}
 }
 
+// An operator publishing t=y has not accepted accountability, so the stamped
+// result must be none — never pass — with the would-be result attached.
+func TestEvaluateTestingModeIsNotPass(t *testing.T) {
+	m := milterWith(map[string][]string{
+		rev64:                                 {"v=SWORN1; d=mailer.example.com"},
+		"_prefixes._sworn.mailer.example.com": {"v=SWORN1; p=2001:db8:f00::/48; u=64; t=y"},
+	}, rev64src)
+	got := m.evaluate()
+	want := `mx.example; sworn=none policy.testing=y policy.wouldbe=pass policy.mode=dns policy.op=mailer.example.com policy.unit="2001:db8:f00:1234::/64"`
+	if got != want {
+		t.Errorf("evaluate()\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestEvaluateNone(t *testing.T) {
 	m := milterWith(nil, rev64src) // no records anywhere
 	if got := m.evaluate(); got != "mx.example; sworn=none" {
