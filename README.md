@@ -26,6 +26,10 @@ attestation for email senders.
   reported `sworn=none policy.testing=y policy.wouldbe=pass`, never `pass`,
   so no reputation is staked on a deployment that has not opted in. Strictly
   fail-open — never rejects mail. (Uses `github.com/emersion/go-milter`.)
+- **Record differential** (`cmd/recorddiff`): drives an external implementation
+  through an adversarial corpus of record, prefix, and eligibility cases and
+  fails on any disagreement with this one. The rspamd module is checked
+  against it.
 - **Cross-implementation test vectors** (`cmd/genvectors` → `spec/test-vectors/v1.json`):
   expectations authored from the draft; generation self-checks the reference
   and fails on any disagreement. The [Rust verifier](https://github.com/swornmail/swornmail)

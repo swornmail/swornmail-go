@@ -394,6 +394,11 @@ func protectedHeaders(msg *cose.Sign1Message) (string, error) {
 // at generation time using the same rule the verifier applies to kid.
 func ValidSelector(s string) bool { return validSelector([]byte(s)) }
 
+// EligibleSource reports whether a connecting address may be matched against
+// an attested prefix at all. Exported so other implementations can be checked
+// against this rule rather than against a restatement of it.
+func EligibleSource(a netip.Addr) bool { return eligibleSource(a) }
+
 // ValidatePrefix reports whether p is attestable under -01 §canon:
 // masked-canonical, within 2000::/3, length 32..64, not overlapping Teredo
 // or 6to4. Exported so record generators reject a prefix before it is
