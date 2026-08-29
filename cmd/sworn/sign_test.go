@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net"
 	"net/netip"
 	"path/filepath"
@@ -48,11 +49,20 @@ func TestSignedTokenVerifiesAgainstGeneratedRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rs, err := buildRecords(baseOptions(pub))
+	// genrecord defaults to t=y. Staking reputation is the opt-in, so the
+	// round trip is run against a committed record; the observe-only default
+	// is asserted separately below.
+	committed := baseOptions(pub)
+	committed.Testing = false
+	rs, err := buildRecords(committed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	published, err := sworn.ParseRecord(rs.Key.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := sworn.ParsePolicyRecord(rs.Policy.Value)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,12 +80,33 @@ func TestSignedTokenVerifiesAgainstGeneratedRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := sworn.Verify(token, published.PublicKey, netip.MustParseAddr("2001:db8:f00:1234::25"), now.Add(time.Minute))
+	res, err := sworn.Verify(token, published.PublicKey, policy, netip.MustParseAddr("2001:db8:f00:1234::25"), now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("token from sign does not verify: %v", err)
 	}
 	if res.Operator != "mailer.example.com" || res.Unit.String() != "2001:db8:f00:1234::/64" || res.Selector != "2026a" {
 		t.Errorf("unexpected result %+v", res)
+	}
+	if res.ObservedUnit.String() != "2001:db8:f00:1234::/64" {
+		t.Errorf("observed unit = %s, want the source /64", res.ObservedUnit)
+	}
+
+	// The same token against the DEFAULT record, which carries t=y: a
+	// receiver must not be able to read this as a pass.
+	observing, err := buildRecords(baseOptions(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	testingPolicy, err := sworn.ParsePolicyRecord(observing.Policy.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, terr := sworn.Verify(token, published.PublicKey, testingPolicy, netip.MustParseAddr("2001:db8:f00:1234::25"), now.Add(time.Minute))
+	if !errors.Is(terr, sworn.ErrTestingMode) {
+		t.Fatalf("default t=y record verified as %v, want ErrTestingMode", terr)
+	}
+	if sworn.AuthResult(terr) != "none" {
+		t.Errorf("t=y reported as %s, want none", sworn.AuthResult(terr))
 	}
 }
 
@@ -131,7 +162,12 @@ func answer[T any](m map[string][]T, key string) ([]T, error) {
 // pointer.
 func TestGeneratedRecordsSatisfyDiscovery(t *testing.T) {
 	pub := testKey(t)
-	rs, err := buildRecords(baseOptions(pub))
+	// genrecord defaults to t=y. Staking reputation is the opt-in, so the
+	// round trip is run against a committed record; the observe-only default
+	// is asserted separately below.
+	committed := baseOptions(pub)
+	committed.Testing = false
+	rs, err := buildRecords(committed)
 	if err != nil {
 		t.Fatal(err)
 	}

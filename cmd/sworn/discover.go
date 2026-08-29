@@ -39,10 +39,14 @@ func cmdDiscover(args []string) int {
 		// the would-be result attached, and no reputation is staked.
 		out = discoverOutput{
 			Result: "none", Testing: true, WouldBe: "pass",
-			Mode: res.Mode, Operator: res.Operator, Unit: res.Unit.String(),
+			Mode: res.Mode, Operator: res.Operator,
+			Unit: res.Unit.String(), Observed: res.ObservedUnit.String(),
 		}
 	case derr == nil:
-		out = discoverOutput{Result: "pass", Mode: res.Mode, Operator: res.Operator, Unit: res.Unit.String()}
+		out = discoverOutput{
+			Result: "pass", Mode: res.Mode, Operator: res.Operator,
+			Unit: res.Unit.String(), Observed: res.ObservedUnit.String(),
+		}
 	case errors.Is(derr, discover.ErrTemp):
 		out = discoverOutput{Result: "temperror"}
 	default: // ErrNone
@@ -64,10 +68,13 @@ func cmdDiscover(args []string) int {
 func textLine(out discoverOutput) string {
 	switch {
 	case out.Testing:
-		return fmt.Sprintf("sworn=none testing=y wouldbe=%s mode=%s op=%s unit=%s (observe-only: no reputation staked)",
-			out.WouldBe, out.Mode, out.Operator, out.Unit)
+		return fmt.Sprintf("sworn=none testing=y wouldbe=%s mode=%s op=%s unit=%s observed=%s (observe-only: no reputation staked)",
+			out.WouldBe, out.Mode, out.Operator, out.Unit, out.Observed)
 	case out.Result == "pass":
-		return fmt.Sprintf("sworn=pass mode=%s op=%s unit=%s", out.Mode, out.Operator, out.Unit)
+		// observed= is where reputation may attach; unit= is the publisher's
+		// request and needs independent control evidence to be honoured.
+		return fmt.Sprintf("sworn=pass mode=%s op=%s unit=%s observed=%s",
+			out.Mode, out.Operator, out.Unit, out.Observed)
 	default:
 		return "sworn=" + out.Result
 	}
@@ -80,4 +87,5 @@ type discoverOutput struct {
 	Mode     string `json:"mode,omitempty"`
 	Operator string `json:"operator,omitempty"`
 	Unit     string `json:"unit,omitempty"`
+	Observed string `json:"observed,omitempty"`
 }

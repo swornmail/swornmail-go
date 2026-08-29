@@ -70,7 +70,7 @@ func reverseNibbleName(a netip.Addr, prefixLen int) (string, bool) {
 // evaluated; if isPublicSuffix is non-nil, a public suffix or its ancestor
 // stops the walk instead.
 func candidateDomains(host string, isPublicSuffix func(string) bool) []string {
-	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 	var out []string
 	for cur := host; cur != "" && len(out) < 5; {
 		labels := strings.Split(cur, ".")

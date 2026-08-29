@@ -3,7 +3,8 @@
 // plugins) for cross-implementation conformance, per draft-kafedzhy-swornmail-01.
 //
 // Expectations are authored from the DRAFT, not derived from the reference
-// implementation. Generation self-checks every case against sworn.Verify and
+// implementation. Generation self-checks every case against
+// sworn.VerifySignatureOnly and
 // FAILS if the implementation disagrees with the authored expectation — so a
 // verifier that is more lenient than the spec makes generation fail rather
 // than silently shrinking the suite. Cases whose reason-code the draft leaves
@@ -67,6 +68,28 @@ type vectorCase struct {
 	Unit      string   `json:"unit,omitempty"`
 }
 
+// authorizationCase exercises draft §Verification check 3 and the observed
+// unit of §Receiver Reputation Semantics: the part of the protocol that has no
+// coverage in the token vectors, because those verify a signature against a key
+// with no policy in sight.
+type authorizationCase struct {
+	Name     string `json:"name"`
+	TokenB64 string `json:"token_b64url"`
+	TokenStd string `json:"token_b64std"`
+	TokenHex string `json:"token_hex"`
+	Policy   string `json:"policy_record"`
+	Source   string `json:"source_ip"`
+	Now      int64  `json:"now_unix"`
+	// AuthResult is the Authentication-Results value and is the load-bearing
+	// assertion: it is the one output both implementations must agree on.
+	AuthResult string `json:"auth_result"`
+	Expect     string `json:"expect,omitempty"` // reason token, rejections only
+	Testing    bool   `json:"testing,omitempty"`
+	Operator   string `json:"operator,omitempty"`
+	Unit       string `json:"unit,omitempty"`          // the operator's claim
+	Observed   string `json:"observed_unit,omitempty"` // what the connection proved
+}
+
 type recordCase struct {
 	Name   string `json:"name"`
 	TXT    string `json:"txt"`
@@ -75,18 +98,19 @@ type recordCase struct {
 }
 
 type vectors struct {
-	Spec        string       `json:"spec"`
-	Note        string       `json:"note"`
-	SeedHex     string       `json:"ed25519_seed_hex"`
-	PubHex      string       `json:"ed25519_public_hex"`
-	Selector    string       `json:"selector"`
-	ContentType string       `json:"content_type"`
-	KeyQName    string       `json:"key_record_qname"`
-	KeyRecord   string       `json:"key_record"`
-	PolicyQName string       `json:"policy_record_qname"`
-	PolicyRec   string       `json:"policy_record"`
-	Cases       []vectorCase `json:"cases"`
-	Records     []recordCase `json:"records"`
+	Spec          string              `json:"spec"`
+	Note          string              `json:"note"`
+	SeedHex       string              `json:"ed25519_seed_hex"`
+	PubHex        string              `json:"ed25519_public_hex"`
+	Selector      string              `json:"selector"`
+	ContentType   string              `json:"content_type"`
+	KeyQName      string              `json:"key_record_qname"`
+	KeyRecord     string              `json:"key_record"`
+	PolicyQName   string              `json:"policy_record_qname"`
+	PolicyRec     string              `json:"policy_record"`
+	Cases         []vectorCase        `json:"cases"`
+	Records       []recordCase        `json:"records"`
+	Authorization []authorizationCase `json:"authorization"`
 }
 
 // --- CBOR / COSE builders for malformed cases ---
@@ -410,7 +434,7 @@ func main() {
 			failures = append(failures, c.name+": bad source addr")
 			continue
 		}
-		res, verr := sworn.Verify(c.token, pub, src, time.Unix(c.now, 0).UTC())
+		res, verr := sworn.VerifySignatureOnly(c.token, pub, src, time.Unix(c.now, 0).UTC())
 		got := sworn.Reason(verr)
 		ok := got == c.expect
 		for _, e := range c.expectAny {
@@ -436,6 +460,122 @@ func main() {
 		}
 	}
 
+	// --- policy authorization, authored from the draft ---
+	//
+	// Expectations come from §Verification check 3 ("the token prefix MUST be
+	// the same as or a subnet of at least one of the first 64 policy prefixes,
+	// and the token unit MUST equal the policy u value"), §Testing Mode, and
+	// the observed-unit rule in §Receiver Reputation Semantics. As with the
+	// token cases, the reference implementation is checked against these, not
+	// the other way round.
+	authTok := func(prefix string, bits int, unit uint8) []byte {
+		tok, err := sworn.Sign(sworn.Payload{
+			Operator: "mailer.example.com",
+			Prefix:   netip.PrefixFrom(netip.MustParseAddr(prefix), bits),
+			Unit:     unit,
+			IssuedAt: time.Unix(t0, 0).UTC(),
+			Expires:  time.Unix(expU, 0).UTC(),
+			Role:     "mta",
+		}, selector, priv)
+		if err != nil {
+			panic(fmt.Sprintf("authorization token %s/%d u=%d: %v", prefix, bits, unit, err))
+		}
+		return tok
+	}
+	tok48 := authTok("2001:db8:f00::", 48, 64)
+	tok32 := authTok("2001:db8::", 32, 32)
+	const inSrc = "2001:db8:f00:1234::a:1"
+
+	auths := []authorizationCase{
+		{Name: "policy_authorizes_exact_prefix", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; p=2001:db8:f00::/48; u=64", Source: inSrc, Now: t0 + 1800,
+			AuthResult: "pass", Operator: "mailer.example.com",
+			Unit: "2001:db8:f00:1234::/64", Observed: "2001:db8:f00:1234::/64"},
+		// A broader policy prefix authorizes a more specific token prefix.
+		{Name: "policy_authorizes_broader_prefix", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; p=2001:db8::/32; u=64", Source: inSrc, Now: t0 + 1800,
+			AuthResult: "pass", Operator: "mailer.example.com",
+			Unit: "2001:db8:f00:1234::/64", Observed: "2001:db8:f00:1234::/64"},
+		// ...but never the reverse: a narrow enumeration cannot authorize its parent.
+		{Name: "policy_narrower_than_token_prefix", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; p=2001:db8:f00:1200::/56; u=64", Source: inSrc, Now: t0 + 1800,
+			AuthResult: "permerror", Expect: "unauthorized_prefix"},
+		{Name: "policy_unrelated_prefix", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; p=2001:db8:bad::/48; u=64", Source: inSrc, Now: t0 + 1800,
+			AuthResult: "permerror", Expect: "unauthorized_prefix"},
+		// "A policy with no p value authorizes no Mode-2 token."
+		{Name: "policy_without_prefixes_authorizes_nothing", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; u=64", Source: inSrc, Now: t0 + 1800,
+			AuthResult: "permerror", Expect: "unauthorized_prefix"},
+		{Name: "policy_unit_mismatch", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; p=2001:db8:f00::/48; u=56", Source: inSrc, Now: t0 + 1800,
+			AuthResult: "permerror", Expect: "policy_unit_mismatch"},
+		// The unit rule applies to the default too: absent u= means 64.
+		{Name: "policy_default_unit_matches_token", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; p=2001:db8:f00::/48", Source: inSrc, Now: t0 + 1800,
+			AuthResult: "pass", Operator: "mailer.example.com",
+			Unit: "2001:db8:f00:1234::/64", Observed: "2001:db8:f00:1234::/64"},
+		// t=y is never a pass, for credit or blame.
+		{Name: "testing_policy_is_none_not_pass", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; p=2001:db8:f00::/48; u=64; t=y", Source: inSrc, Now: t0 + 1800,
+			AuthResult: "none", Testing: true, Operator: "mailer.example.com",
+			Unit: "2001:db8:f00:1234::/64", Observed: "2001:db8:f00:1234::/64"},
+		// A claimant declaring a shared aggregate: the declared unit is the
+		// claim, the observed unit is the /64 the connection corroborated.
+		{Name: "coarse_declared_unit_does_not_widen_observed", TokenHex: hex.EncodeToString(tok32),
+			Policy: "v=SWORN1; p=2001:db8::/32; u=32", Source: "2001:db8:aaaa:bbbb::5", Now: t0 + 1800,
+			AuthResult: "pass", Operator: "mailer.example.com",
+			Unit: "2001:db8::/32", Observed: "2001:db8:aaaa:bbbb::/64"},
+		// A local check fails before policy is consulted, so the outcome is the
+		// local failure and no DNS was owed.
+		{Name: "local_failure_precedes_authorization", TokenHex: hex.EncodeToString(tok48),
+			Policy: "v=SWORN1; p=2001:db8:f00::/48; u=64", Source: "2001:db8:bad::1", Now: t0 + 1800,
+			AuthResult: "fail", Expect: "off_prefix"},
+	}
+	for i := range auths {
+		tok, err := hex.DecodeString(auths[i].TokenHex)
+		if err != nil {
+			panic(err)
+		}
+		auths[i].TokenB64 = base64.RawURLEncoding.EncodeToString(tok)
+		auths[i].TokenStd = base64.StdEncoding.EncodeToString(tok)
+
+		src, err := netip.ParseAddr(auths[i].Source)
+		if err != nil {
+			failures = append(failures, "authorization "+auths[i].Name+": bad source")
+			continue
+		}
+		policy, perr := sworn.ParsePolicyRecord(auths[i].Policy)
+		if perr != nil {
+			failures = append(failures, fmt.Sprintf("authorization %s: policy does not parse: %v", auths[i].Name, perr))
+			continue
+		}
+		res, verr := sworn.Verify(tok, pub, policy, src, time.Unix(auths[i].Now, 0).UTC())
+		if got := sworn.AuthResult(verr); got != auths[i].AuthResult {
+			failures = append(failures, fmt.Sprintf("authorization %s: auth_result %s != %s", auths[i].Name, got, auths[i].AuthResult))
+			continue
+		}
+		if auths[i].Expect != "" {
+			if got := sworn.Reason(verr); got != auths[i].Expect {
+				failures = append(failures, fmt.Sprintf("authorization %s: reason %s != %s", auths[i].Name, got, auths[i].Expect))
+			}
+		}
+		if auths[i].Operator != "" {
+			if res.Operator != auths[i].Operator {
+				failures = append(failures, fmt.Sprintf("authorization %s: operator %q != %q", auths[i].Name, res.Operator, auths[i].Operator))
+			}
+			if res.Unit.String() != auths[i].Unit {
+				failures = append(failures, fmt.Sprintf("authorization %s: unit %s != %s", auths[i].Name, res.Unit, auths[i].Unit))
+			}
+			if res.ObservedUnit.String() != auths[i].Observed {
+				failures = append(failures, fmt.Sprintf("authorization %s: observed %s != %s", auths[i].Name, res.ObservedUnit, auths[i].Observed))
+			}
+			if res.Testing != auths[i].Testing {
+				failures = append(failures, fmt.Sprintf("authorization %s: testing %v != %v", auths[i].Name, res.Testing, auths[i].Testing))
+			}
+		}
+	}
+
 	records := []recordCase{
 		{"key_record", "v=SWORN1; k=ed25519; pk=" + base64.StdEncoding.EncodeToString(pub), "key", "ok"},
 		{"key_legacy_selector_ignored", "v=SWORN1; k=ed25519; s=2026a; pk=" + base64.StdEncoding.EncodeToString(pub), "key", "ok"},
@@ -451,6 +591,28 @@ func main() {
 		{"policy_duplicate_tag", "v=SWORN1; u=64; u=48", "policy", "error"},
 		{"policy_prefix_out_of_range", "v=SWORN1; p=2001:db8::/16", "policy", "error"},
 		{"policy_v_not_first", "u=64; v=SWORN1", "policy", "error"},
+		// A record is printable ASCII, 0x20..0x7E. These are the bytes three
+		// runtimes classify differently as "whitespace"; stating the rule as an
+		// octet range is what makes them agree. Pinned here because the Go/Lua
+		// record differential cannot see the Rust verifier.
+		{"policy_vertical_tab", "v=SWORN1; p=2001:db8:f00::/48; x=a\x0bb", "policy", "error"},
+		{"policy_form_feed", "v=SWORN1; p=2001:db8:f00::/48; x=a\x0cb", "policy", "error"},
+		{"policy_escape_byte", "v=SWORN1; p=2001:db8:f00::/48; x=a\x1bb", "policy", "error"},
+		{"policy_no_break_space", "v=SWORN1; p=2001:db8:f00::/48; x=a\u00a0b", "policy", "error"},
+		{"policy_ideographic_space", "v=SWORN1; p=2001:db8:f00::/48; x=a\u3000b", "policy", "error"},
+		{"policy_trailing_no_break_space", "v=SWORN1; p=2001:db8:f00::/48; u=64\u00a0", "policy", "error"},
+		{"policy_space_in_value", "v=SWORN1; p=2001:db8:f00::/48; x=a b", "policy", "error"},
+		{"policy_tab_in_value", "v=SWORN1; p=2001:db8:f00::/48; x=a\tb", "policy", "error"},
+		// HTAB between tags is what a hand-edited zone file produces, and is
+		// stripped, not rejected. Pinned so the octet gate cannot quietly
+		// start rejecting records operators actually write.
+		{"policy_tab_between_tags", "v=SWORN1;\tp=2001:db8:f00::/48", "policy", "ok"},
+		{"policy_tab_around_value", "v=SWORN1; p=\t2001:db8:f00::/48\t", "policy", "ok"},
+		// Empty p= elements are skipped, not rejected: sloppy, not hostile.
+		// This decides how many prefixes authorize, so all three must agree.
+		{"policy_trailing_comma", "v=SWORN1; p=2001:db8:f00::/48,", "policy", "ok"},
+		{"policy_leading_comma", "v=SWORN1; p=,2001:db8:f00::/48", "policy", "ok"},
+		{"policy_double_comma", "v=SWORN1; p=2001:db8:f00::/48,,2001:db8:f01::/48", "policy", "ok"},
 	}
 	for _, r := range records {
 		var perr error
@@ -495,18 +657,19 @@ func main() {
 	}
 
 	v := vectors{
-		Spec:        "draft-kafedzhy-swornmail-01",
-		Note:        "expect = single reason; expect_any = draft leaves reason-code order unspecified, any listed value conforms. token_b64url is the wire encoding.",
-		SeedHex:     hex.EncodeToString(seed),
-		PubHex:      hex.EncodeToString(pub),
-		Selector:    selector,
-		ContentType: sworn.ContentType,
-		KeyQName:    selector + "._sworn.mailer.example.com",
-		KeyRecord:   "v=SWORN1; k=ed25519; pk=" + base64.StdEncoding.EncodeToString(pub),
-		PolicyQName: "_prefixes._sworn.mailer.example.com",
-		PolicyRec:   "v=SWORN1; p=2001:db8:f00::/48; u=64",
-		Cases:       outCases,
-		Records:     records,
+		Spec:          "draft-kafedzhy-swornmail-01",
+		Note:          "expect = single reason; expect_any = draft leaves reason-code order unspecified, any listed value conforms. token_b64url is the wire encoding.",
+		SeedHex:       hex.EncodeToString(seed),
+		PubHex:        hex.EncodeToString(pub),
+		Selector:      selector,
+		ContentType:   sworn.ContentType,
+		KeyQName:      selector + "._sworn.mailer.example.com",
+		KeyRecord:     "v=SWORN1; k=ed25519; pk=" + base64.StdEncoding.EncodeToString(pub),
+		PolicyQName:   "_prefixes._sworn.mailer.example.com",
+		PolicyRec:     "v=SWORN1; p=2001:db8:f00::/48; u=64",
+		Cases:         outCases,
+		Records:       records,
+		Authorization: auths,
 	}
 
 	f, err := os.Create(*out)
@@ -521,6 +684,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "encode:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("wrote %s (%d cases, %d records, base token=%d bytes)\n",
-		*out, len(v.Cases), len(v.Records), len(good))
+	fmt.Printf("wrote %s (%d cases, %d records, %d authorization, base token=%d bytes)\n",
+		*out, len(v.Cases), len(v.Records), len(v.Authorization), len(good))
 }

@@ -13,8 +13,14 @@ import (
 // Result of a successful Mode-1 discovery.
 type Result struct {
 	Operator string       // confirmed accountable operator domain
-	Unit     netip.Prefix // source masked to the operator's declared unit
+	Unit     netip.Prefix // source masked to the operator's declared unit — a claim
 	Mode     string       // always "dns" for Mode 1
+	// ObservedUnit is the reputation key: the source masked to
+	// sworn.ObservedUnitLen. Enumerating a prefix is a self-assertion, so a
+	// policy declaring a coarse unit over space the publisher does not
+	// exclusively control MUST NOT widen where reputation lands. Receivers
+	// key on (Operator, ObservedUnit) absent independent control evidence.
+	ObservedUnit netip.Prefix
 	// Prefix is the enumerated prefix that matched — what the operator
 	// actually staked, as distinct from the unit they ask receivers to
 	// aggregate at. Consumers that record accountability rather than just
@@ -96,6 +102,10 @@ func Discover(ctx context.Context, r Resolver, source netip.Addr, opt Options) (
 		return Result{}, ErrNone
 	}
 	host := strings.TrimSuffix(ptrs[0], ".")
+	if !sworn.ValidDomain(host) {
+		return Result{}, ErrNone
+	}
+	host = strings.ToLower(host)
 	confirmedHost, err := d.forwardConfirm(host, source)
 	if err != nil {
 		return Result{}, ErrTemp
@@ -133,6 +143,10 @@ func (d *discovery) pointerDomain(txts []string) (string, bool) {
 // candidate's policy record; on success it returns the Mode-1 Result keyed on
 // the policy record's declared unit.
 func (d *discovery) confirm(domain string, source netip.Addr) (Result, bool, error) {
+	if !sworn.ValidDomain(domain) {
+		return Result{}, false, nil
+	}
+	domain = strings.ToLower(domain)
 	txts, err := d.lookupTXT("_prefixes._sworn." + domain)
 	if err != nil {
 		if isNotFound(err) {
@@ -161,8 +175,13 @@ func (d *discovery) confirm(domain string, source netip.Addr) (Result, bool, err
 	if err != nil {
 		return Result{}, false, nil
 	}
+	// From the source, never from the record: the publisher chose the record.
+	observed, err := source.Prefix(sworn.ObservedUnitLen)
+	if err != nil {
+		return Result{}, false, nil
+	}
 	return Result{
-		Operator: domain, Unit: unit, Mode: "dns",
+		Operator: domain, Unit: unit, ObservedUnit: observed, Mode: "dns",
 		Prefix: best, Testing: policy.Testing,
 	}, true, nil
 }

@@ -108,11 +108,6 @@ func notes(o genOptions, shortestPrefix, policyLen int) []string {
 		out = append(out, "t=y is NOT set: publishing this accepts accountability for every address in\n"+
 			"the listed prefixes, including sub-allocations whose PTRs you do not control.")
 	}
-	if o.Unit < shortestPrefix {
-		out = append(out, fmt.Sprintf("u=%d is coarser than your shortest attested prefix (/%d), so the reputation\n"+
-			"unit spans addresses you have not attested; Mode-2 tokens require unit >= prefix length.",
-			o.Unit, shortestPrefix))
-	}
 	if d := ruaDomain(o.RUA); d != "" && d != o.Domain && !strings.HasSuffix(d, "."+o.Domain) {
 		out = append(out, fmt.Sprintf("the rua mailbox is outside %s, so receivers must confirm consent before\n"+
 			"sending anything: %s has to publish\n"+
