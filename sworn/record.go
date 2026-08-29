@@ -35,6 +35,24 @@ type PolicyRecord struct {
 	RUA      string
 }
 
+// Authorizes reports whether the policy explicitly covers a signed token
+// prefix. A broader policy prefix may authorize a more specific token prefix,
+// but never the reverse. Both prefixes must already meet the protocol's
+// canonical address constraints.
+func (r PolicyRecord) Authorizes(tokenPrefix netip.Prefix) bool {
+	if r.Version != Version || validatePrefix(tokenPrefix) != nil {
+		return false
+	}
+	for _, allowed := range r.Prefixes {
+		if validatePrefix(allowed) == nil &&
+			tokenPrefix.Bits() >= allowed.Bits() &&
+			allowed.Contains(tokenPrefix.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
 // MaxPolicyPrefixes caps enumeration per I-D -01 §Policy Record.
 const MaxPolicyPrefixes = 64
 
@@ -43,7 +61,7 @@ var (
 	ErrRecordVersion     = errors.New("sworn: unsupported record version")
 	ErrRecordAlgorithm   = errors.New("sworn: unsupported algorithm")
 	ErrRecordKey         = errors.New("sworn: invalid public key")
-	ErrRecordUnitInvalid = errors.New("sworn: invalid unit value")
+	ErrRecordUnitInvalid = errors.New("sworn: unit must cover no more space than every policy prefix and be at most 64")
 	ErrRecordDupTag      = errors.New("sworn: duplicate record tag")
 	ErrRecordPrefix      = errors.New("sworn: invalid or out-of-range prefix")
 	ErrRecordRUA         = errors.New("sworn: rua must be a non-empty mailto: address")
@@ -53,6 +71,28 @@ var (
 // -01 §Record Tag Parsing rules: v= first, no duplicate tag, no whitespace
 // inside a value. Unknown tags are returned for the caller to ignore.
 func splitTags(txt string) ([][2]string, error) {
+	// A SwornMail record is printable ASCII by construction: domains are LDH,
+	// prefixes and units are digits and punctuation, rua is a dot-atom. So the
+	// rule is the simplest one three implementations can agree on exactly —
+	// reject every byte outside 0x20..0x7E, plus HTAB.
+	//
+	// This is not pedantry. "Whitespace" is where parsers silently disagree:
+	// Go's unicode.IsSpace covers U+00A0 and U+3000, Lua's %s is byte-wise,
+	// and Rust's is_ascii_whitespace excludes VT. The same record then parses
+	// differently in three places, and a value one verifier rejects another
+	// trims into something that looks safe. Restricting the record to an
+	// explicit octet set removes the disagreement at its source, and takes CR,
+	// LF, NUL, DEL and every other C0 control with it.
+	//
+	// HTAB is admitted because a hand-edited zone file legitimately contains
+	// one between tags, and all three implementations already strip it there
+	// and reject it inside a value — so it is a byte operators use and nothing
+	// disagrees about. Every other control is not.
+	for i := 0; i < len(txt); i++ {
+		if c := txt[i]; c != '\t' && (c < 0x20 || c > 0x7e) {
+			return nil, ErrRecordSyntax
+		}
+	}
 	var pairs [][2]string
 	seen := map[string]bool{}
 	for _, part := range strings.Split(txt, ";") {
@@ -71,6 +111,8 @@ func splitTags(txt string) ([][2]string, error) {
 		if len(pairs) == 0 && k != "v" {
 			return nil, ErrRecordSyntax
 		}
+		// Only SP and HTAB survive the octet gate above, and those are
+		// exactly what "whitespace" means here.
 		if strings.ContainsAny(v, " \t") {
 			return nil, ErrRecordSyntax
 		}
@@ -149,7 +191,7 @@ func ParsePointerRecord(txt string) (string, error) {
 	if version == "" || domain == "" || !ValidDomain(domain) {
 		return "", ErrRecordSyntax
 	}
-	return domain, nil
+	return strings.ToLower(domain), nil
 }
 
 // ParsePolicyRecord parses a _prefixes._sworn policy record.
@@ -199,8 +241,7 @@ func ParsePolicyRecord(txt string) (PolicyRecord, error) {
 			// rejected here rather than left for a report sender to
 			// interpret — a parser that accepts an arbitrary URI hands its
 			// consumers an attacker-chosen target.
-			addr, ok := strings.CutPrefix(v, "mailto:")
-			if !ok || addr == "" {
+			if !validRUAMailto(v) {
 				return PolicyRecord{}, ErrRecordRUA
 			}
 			rec.RUA = v
@@ -209,5 +250,39 @@ func ParsePolicyRecord(txt string) (PolicyRecord, error) {
 	if rec.Version == "" {
 		return PolicyRecord{}, ErrRecordSyntax
 	}
+	for _, prefix := range rec.Prefixes {
+		if int(rec.Unit) < prefix.Bits() {
+			return PolicyRecord{}, ErrRecordUnitInvalid
+		}
+	}
 	return rec, nil
+}
+
+// validRUAMailto accepts one conservative RFC 5322 dot-atom mailbox. SwornMail
+// aggregate reports do not need quoted local parts, URI parameters, or
+// recipient lists; rejecting them removes parser differentials and prevents a
+// report destination from becoming a header or command injection surface.
+func validRUAMailto(value string) bool {
+	address, ok := strings.CutPrefix(value, "mailto:")
+	if !ok || strings.Count(address, "@") != 1 {
+		return false
+	}
+	local, domain, _ := strings.Cut(address, "@")
+	if local == "" || !ValidDomain(domain) {
+		return false
+	}
+	for _, atom := range strings.Split(local, ".") {
+		if atom == "" {
+			return false
+		}
+		for _, c := range []byte(atom) {
+			switch {
+			case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			case strings.ContainsRune("!#$%&'*+-/=?^_`{|}~", rune(c)):
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }

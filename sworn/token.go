@@ -22,10 +22,16 @@ const (
 	DNSLabel             = "_sworn"
 	DefaultUnitPrefixLen = 64
 	MaxUnitPrefixLen     = 64 // -01: unit finer than /64 cannot aggregate under SLAAC
-	MinPrefixLen         = 32 // -01: attested prefix length floor
-	MaxPrefixLen         = 64 // -01: attested prefix length ceiling
-	MaxTokenLifetime     = 24 * time.Hour
-	SkewTolerance        = 300 * time.Second // -01: fixed clock-skew tolerance
+	// ObservedUnitLen is the fallback reputation boundary: the connecting
+	// source's /64. It is written as its own constant rather than derived
+	// from the declared unit on purpose — a claimant-declared unit MUST NOT
+	// be able to widen it, so a future change to the unit range cannot
+	// silently move this boundary.
+	ObservedUnitLen  = 64
+	MinPrefixLen     = 32 // -01: attested prefix length floor
+	MaxPrefixLen     = 64 // -01: attested prefix length ceiling
+	MaxTokenLifetime = 24 * time.Hour
+	SkewTolerance    = 300 * time.Second // -01: fixed clock-skew tolerance
 	// ContentType is the COSE protected content-type header value that
 	// domain-separates SwornMail tokens from any other COSE use of a key.
 	ContentType = "application/sworn-token+cbor"
@@ -73,20 +79,30 @@ func mustPrefixes(ss ...string) []netip.Prefix {
 // Verification failure reasons. Distinct sentinel errors so callers can map
 // them to the Authentication-Results reason-code taxonomy.
 var (
-	ErrMalformed       = errors.New("sworn: malformed token")
-	ErrBadSignature    = errors.New("sworn: signature verification failed")
-	ErrExpired         = errors.New("sworn: token expired")
-	ErrNotYetValid     = errors.New("sworn: token not yet valid")
-	ErrLifetimeTooLong = errors.New("sworn: token lifetime exceeds 24h")
-	ErrOffPrefix       = errors.New("sworn: source address outside attested prefix")
-	ErrIneligibleSrc   = errors.New("sworn: source address is not eligible global-unicast IPv6")
-	ErrBadUnit         = errors.New("sworn: unit shorter than attested prefix or greater than 64")
-	ErrBadPrefix       = errors.New("sworn: attested prefix non-canonical or out of range")
-	ErrContentType     = errors.New("sworn: missing or wrong content-type header")
-	ErrNoSelector      = errors.New("sworn: missing kid (selector) header")
-	ErrHeaderConfusion = errors.New("sworn: protected/unprotected header conflict or crit present")
-	ErrBadRole         = errors.New("sworn: missing or unregistered role")
-	ErrBadValidity     = errors.New("sworn: exp not greater than iat")
+	ErrMalformed          = errors.New("sworn: malformed token")
+	ErrBadSignature       = errors.New("sworn: signature verification failed")
+	ErrExpired            = errors.New("sworn: token expired")
+	ErrNotYetValid        = errors.New("sworn: token not yet valid")
+	ErrLifetimeTooLong    = errors.New("sworn: token lifetime exceeds 24h")
+	ErrOffPrefix          = errors.New("sworn: source address outside attested prefix")
+	ErrIneligibleSrc      = errors.New("sworn: source address is not eligible global-unicast IPv6")
+	ErrBadUnit            = errors.New("sworn: unit shorter than attested prefix or greater than 64")
+	ErrBadPrefix          = errors.New("sworn: attested prefix non-canonical or out of range")
+	ErrContentType        = errors.New("sworn: missing or wrong content-type header")
+	ErrNoSelector         = errors.New("sworn: missing kid (selector) header")
+	ErrHeaderConfusion    = errors.New("sworn: protected/unprotected header conflict or crit present")
+	ErrBadRole            = errors.New("sworn: missing or unregistered role")
+	ErrBadValidity        = errors.New("sworn: exp not greater than iat")
+	ErrUnauthorizedPrefix = errors.New("sworn: token prefix is not authorized by operator policy")
+	ErrPolicyUnitMismatch = errors.New("sworn: token unit does not match operator policy")
+	// ErrTestingMode is returned WITH a populated Result when every check
+	// passed but the authorizing policy carries t=y. It is an error rather
+	// than a nil-error flag because the failure mode it prevents is a caller
+	// writing `if err == nil { report pass }` — a testing operator has not
+	// accepted accountability and must never be reported as passing, for
+	// credit or blame. Callers wanting policy.wouldbe=pass check for it
+	// explicitly and read the returned Result.
+	ErrTestingMode = errors.New("sworn: operator policy is in testing mode (t=y)")
 )
 
 // Payload is the signed claim: "connections from Prefix are operated by
@@ -103,12 +119,75 @@ type Payload struct {
 // Result of a successful verification.
 type Result struct {
 	Operator string
-	// Unit is the reputation key: the source address masked to the
-	// payload's unit length. Receivers key reputation on (Operator, Unit).
+	// Unit is the aggregation the operator ASKED for: the source address
+	// masked to the payload's unit length. It is a claim, not evidence, and
+	// on its own it is not a safe reputation key — see ObservedUnit.
 	Unit netip.Prefix
+	// ObservedUnit is the reputation key: the source address masked to
+	// ObservedUnitLen. Receivers key reputation on (Operator, ObservedUnit)
+	// unless they hold independent evidence that the operator controls the
+	// whole signed prefix (§Receiver Reputation Semantics). Source membership
+	// proves one connection came from inside Prefix; it never proves
+	// exclusive control of it, so a shared-hosting tenant that declares its
+	// provider's aggregate cannot widen the boundary reputation attaches to.
+	ObservedUnit netip.Prefix
+	// Prefix is the signed accountable boundary — the space the operator
+	// claims. Rolling abuse up to it requires independent control evidence;
+	// a signed broad claim is never that evidence.
+	Prefix netip.Prefix
 	// Selector is the token's kid header; the caller must have fetched the
 	// verification key from <Selector>._sworn.<Operator>.
 	Selector string
+	// Testing and RUA come from the policy record only after that policy has
+	// authorized the token prefix and the signature has verified.
+	Testing bool
+	RUA     string
+}
+
+// payloadKeys decodes the payload map and enforces the -01 payload CDDL rule
+// that every key is an integer (`* int => any`). Negative keys are legal and
+// unknown, so they are dropped rather than rejected; the defined keys 1..6 are
+// all positive.
+//
+// Decoding straight into map[int]cbor.RawMessage is not sufficient: the CBOR
+// library coerces a simple value into the integer it encodes, so `simple(1)`
+// arrives as key 1. A payload carrying `{simple(1): "evil.example", 2: ...}`
+// and no integer key 1 therefore decoded cleanly, with the operator taken from
+// the simple value — while a reader that honours `* int => any` rejects the
+// same signed payload outright. One token, two operator domains, depending on
+// which implementation read it.
+//
+// Presenting both `1` and `simple(1)` does NOT get through: the decoder's
+// duplicate-key check fires on the coerced key, in either order. Verified, not
+// assumed — the exploitable shape is the lone simple value standing in for a
+// required field, which is the case the test below pins.
+//
+// Keys are therefore decoded as `any` and type-checked before anything reads
+// them.
+func payloadKeys(b []byte) (map[int]cbor.RawMessage, error) {
+	var loose map[any]cbor.RawMessage
+	if err := detDec.Unmarshal(b, &loose); err != nil {
+		return nil, ErrMalformed
+	}
+	raw := make(map[int]cbor.RawMessage, len(loose))
+	for k, v := range loose {
+		switch n := k.(type) {
+		case uint64:
+			if n > uint64(^uint(0)>>1) {
+				return nil, ErrMalformed
+			}
+			if _, dup := raw[int(n)]; dup {
+				return nil, ErrMalformed
+			}
+			raw[int(n)] = v
+		case int64:
+			// A negative key: valid CDDL `int`, never a defined field, ignored.
+		default:
+			// Text strings, byte strings, simple values, floats: not `int`.
+			return nil, ErrMalformed
+		}
+	}
+	return raw, nil
 }
 
 // prefix wire form: 16-byte address followed by one prefix-length byte.
@@ -228,9 +307,10 @@ func init() {
 }
 
 func encodePayload(p Payload) ([]byte, error) {
-	if p.Operator == "" {
+	if !ValidDomain(p.Operator) {
 		return nil, ErrMalformed
 	}
+	p.Operator = strings.ToLower(p.Operator)
 	if err := validatePrefix(p.Prefix); err != nil {
 		return nil, err
 	}
@@ -245,9 +325,9 @@ func encodePayload(p Payload) ([]byte, error) {
 }
 
 func decodePayload(b []byte) (Payload, error) {
-	var raw map[int]cbor.RawMessage
-	if err := detDec.Unmarshal(b, &raw); err != nil {
-		return Payload{}, ErrMalformed
+	raw, err := payloadKeys(b)
+	if err != nil {
+		return Payload{}, err
 	}
 	var (
 		p   Payload
@@ -275,6 +355,7 @@ func decodePayload(b []byte) (Payload, error) {
 	if !ValidDomain(p.Operator) {
 		return Payload{}, ErrMalformed
 	}
+	p.Operator = strings.ToLower(p.Operator)
 	if iat < 0 || exp < 0 {
 		return Payload{}, ErrMalformed
 	}
@@ -303,9 +384,10 @@ func decodePayload(b []byte) (Payload, error) {
 // deterministic (RFC 8032), so tokens are reproducible for fixed inputs —
 // required for the published test vectors.
 func Sign(p Payload, selector string, priv ed25519.PrivateKey) ([]byte, error) {
-	if selector == "" {
+	if !validSelector([]byte(selector)) {
 		return nil, ErrNoSelector
 	}
+	selector = strings.ToLower(selector)
 	if !p.Expires.After(p.IssuedAt) {
 		return nil, ErrBadValidity
 	}
@@ -386,7 +468,7 @@ func protectedHeaders(msg *cose.Sign1Message) (string, error) {
 	if !isBytes || !validSelector(b) {
 		return "", ErrNoSelector
 	}
-	return string(b), nil
+	return strings.ToLower(string(b)), nil
 }
 
 // ValidSelector reports whether s is a usable selector under the -01 kid
@@ -425,12 +507,116 @@ func validSelector(b []byte) bool {
 	return true
 }
 
-// ParseUnverified runs the header and payload syntax checks — including the
-// kid and operator-domain constraints — WITHOUT the signature, so a caller
-// can learn (selector, operator) safely before fetching the key from
-// <selector>._sworn.<operator>. It performs no DNS and no cryptography. This
-// is the step the -01 §Verification check-3 ordering requires before any DNS
-// query; callers MUST NOT resolve a name derived from an invalid token.
+// PreparedVerification is a token that passed every local check. It exposes
+// only the names needed for the policy lookup; callers must authorize the
+// signed prefix before fetching the key.
+type PreparedVerification struct {
+	message  cose.Sign1Message
+	payload  Payload
+	selector string
+	unit     netip.Prefix
+	observed netip.Prefix
+}
+
+// Operator is the canonical lowercase operator domain to use for DNS.
+func (p *PreparedVerification) Operator() string { return p.payload.Operator }
+
+// Selector is the canonical lowercase key selector to use for DNS.
+func (p *PreparedVerification) Selector() string { return p.selector }
+
+// Prefix is the signed prefix that the policy must authorize.
+func (p *PreparedVerification) Prefix() netip.Prefix { return p.payload.Prefix }
+
+// AuthorizedVerification is a locally valid token whose signed prefix and
+// unit have also been authorized by the operator policy. Only this state may
+// proceed to the key lookup and signature verification in a complete
+// SwornMail verifier.
+type AuthorizedVerification struct {
+	prepared PreparedVerification
+	policy   PolicyRecord
+}
+
+// Authorize applies the separately published operator policy. It must run
+// after the policy lookup and before the key lookup; this ordering prevents a
+// syntactically valid token for unrelated space from causing a key query.
+func (p *PreparedVerification) Authorize(policy PolicyRecord) (AuthorizedVerification, error) {
+	if !policy.Authorizes(p.payload.Prefix) {
+		return AuthorizedVerification{}, ErrUnauthorizedPrefix
+	}
+	if policy.Unit != p.payload.Unit {
+		return AuthorizedVerification{}, ErrPolicyUnitMismatch
+	}
+	return AuthorizedVerification{prepared: *p, policy: policy}, nil
+}
+
+// VerifySignature completes verification with the key fetched from
+// <selector>._sworn.<operator>. Policy metadata is returned only after the
+// signature succeeds, so failed tokens cannot attribute properties to the
+// named operator. A t=y policy yields ErrTestingMode with a populated Result.
+func (a AuthorizedVerification) VerifySignature(pub ed25519.PublicKey) (Result, error) {
+	return verifyPrepared(a.prepared, pub, a.policy.Testing, a.policy.RUA)
+}
+
+// PrepareVerification runs every check that does not require DNS or a key:
+// token structure, protected headers, payload rules, source eligibility and
+// membership, unit rules, and the validity window. A failure here must be
+// returned without issuing either the policy or key query.
+func PrepareVerification(token []byte, source netip.Addr, now time.Time) (*PreparedVerification, error) {
+	var msg cose.Sign1Message
+	if err := msg.UnmarshalCBOR(token); err != nil {
+		return nil, ErrMalformed
+	}
+	selector, err := protectedHeaders(&msg)
+	if err != nil {
+		return nil, err
+	}
+	p, err := decodePayload(msg.Payload)
+	if err != nil {
+		return nil, err
+	}
+	if !p.Expires.After(p.IssuedAt) {
+		return nil, ErrBadValidity
+	}
+	if p.Expires.Sub(p.IssuedAt) > MaxTokenLifetime {
+		return nil, ErrLifetimeTooLong
+	}
+	if int(p.Unit) < p.Prefix.Bits() || p.Unit > MaxUnitPrefixLen {
+		return nil, ErrBadUnit
+	}
+	if p.Role == "esp-tenant" && int(p.Unit) != p.Prefix.Bits() {
+		return nil, ErrBadUnit
+	}
+	if !eligibleSource(source) {
+		return nil, ErrIneligibleSrc
+	}
+	if !p.Prefix.Contains(source) {
+		return nil, ErrOffPrefix
+	}
+	if now.Before(p.IssuedAt.Add(-SkewTolerance)) {
+		return nil, ErrNotYetValid
+	}
+	if now.After(p.Expires.Add(SkewTolerance)) {
+		return nil, ErrExpired
+	}
+	unit, err := source.Prefix(int(p.Unit))
+	if err != nil {
+		return nil, fmt.Errorf("sworn: unit derivation: %w", err)
+	}
+	// Derived from the source, never from the token: the declared unit is a
+	// claim and must not be able to widen the boundary reputation attaches to.
+	observed, err := source.Prefix(ObservedUnitLen)
+	if err != nil {
+		return nil, fmt.Errorf("sworn: observed unit derivation: %w", err)
+	}
+	return &PreparedVerification{
+		message: msg, payload: p, selector: selector, unit: unit, observed: observed,
+	}, nil
+}
+
+// ParseUnverified runs only header and payload syntax checks and returns the
+// canonical DNS names. It is retained for callers that inspect tokens, but it
+// is not sufficient to decide whether DNS may be queried: complete verifiers
+// must use PrepareVerification so time, unit, and source checks run first.
 func ParseUnverified(token []byte) (selector, operator string, err error) {
 	var msg cose.Sign1Message
 	if err = msg.UnmarshalCBOR(token); err != nil {
@@ -447,61 +633,68 @@ func ParseUnverified(token []byte) (selector, operator string, err error) {
 	return selector, p.Operator, nil
 }
 
-// Verify performs the -01 §Verification checks in a DoS-hardened order
-// (cheap local checks before the caller's key is used). `now` is injected
-// for testability; `source` is the connecting address; `pub` is the key the
-// caller fetched from <selector>._sworn.<operator>.
-func Verify(token []byte, pub ed25519.PublicKey, source netip.Addr, now time.Time) (Result, error) {
-	var msg cose.Sign1Message
-	if err := msg.UnmarshalCBOR(token); err != nil {
-		return Result{}, ErrMalformed
-	}
-	selector, err := protectedHeaders(&msg)
+// VerifySignatureOnly validates the token and signature without consulting an
+// operator policy. It exists for frozen wire-vector conformance and MUST NOT
+// be reported as a complete SwornMail pass.
+//
+// Concretely, what it cannot know: whether the operator authorized this
+// prefix at all, and whether the operator publishes t=y. It returns a nil
+// error for a testing operator because it never saw the policy that says so.
+// A caller reporting its result as sworn=pass therefore stakes reputation on
+// an operator who has not accepted any. Production receivers use Verify or
+// the staged PrepareVerification/Authorize/VerifySignature API.
+func VerifySignatureOnly(token []byte, pub ed25519.PublicKey, source netip.Addr, now time.Time) (Result, error) {
+	prepared, err := PrepareVerification(token, source, now)
 	if err != nil {
 		return Result{}, err
 	}
-	p, err := decodePayload(msg.Payload)
+	return verifyPrepared(*prepared, pub, false, "")
+}
+
+// Verify is the complete no-I/O verification helper when the caller already
+// has both DNS records. Receivers doing live DNS should use the staged API so
+// they can fetch and authorize policy before looking up the key. A t=y policy
+// yields ErrTestingMode with a populated Result; key reputation on
+// Result.ObservedUnit, not Result.Unit.
+func Verify(token []byte, pub ed25519.PublicKey, policy PolicyRecord, source netip.Addr, now time.Time) (Result, error) {
+	prepared, err := PrepareVerification(token, source, now)
 	if err != nil {
 		return Result{}, err
 	}
-	// Validity bounds on raw values (check 2), before signature/key use.
-	if !p.Expires.After(p.IssuedAt) {
-		return Result{}, ErrBadValidity
+	authorized, err := prepared.Authorize(policy)
+	if err != nil {
+		return Result{}, err
 	}
-	if p.Expires.Sub(p.IssuedAt) > MaxTokenLifetime {
-		return Result{}, ErrLifetimeTooLong
-	}
-	if int(p.Unit) < p.Prefix.Bits() || p.Unit > MaxUnitPrefixLen {
-		return Result{}, ErrBadUnit
-	}
-	if p.Role == "esp-tenant" && int(p.Unit) != p.Prefix.Bits() {
-		return Result{}, ErrBadUnit
-	}
-	// Source eligibility and membership (cheap, no network).
-	if !eligibleSource(source) {
-		return Result{}, ErrIneligibleSrc
-	}
-	if !p.Prefix.Contains(source) {
-		return Result{}, ErrOffPrefix
-	}
-	// Validity window with fixed skew (check 5).
-	if now.Before(p.IssuedAt.Add(-SkewTolerance)) {
-		return Result{}, ErrNotYetValid
-	}
-	if now.After(p.Expires.Add(SkewTolerance)) {
-		return Result{}, ErrExpired
-	}
-	// Signature (check 4) — the only step needing the fetched key.
+	return authorized.VerifySignature(pub)
+}
+
+// VerifyAuthorized is an explicit alias for Verify.
+func VerifyAuthorized(token []byte, pub ed25519.PublicKey, policy PolicyRecord, source netip.Addr, now time.Time) (Result, error) {
+	return Verify(token, pub, policy, source, now)
+}
+
+func verifyPrepared(prepared PreparedVerification, pub ed25519.PublicKey, testing bool, rua string) (Result, error) {
 	verifier, err := cose.NewVerifier(cose.AlgorithmEdDSA, pub)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := msg.Verify(nil, verifier); err != nil {
+	if err := prepared.message.Verify(nil, verifier); err != nil {
 		return Result{}, ErrBadSignature
 	}
-	unit, err := source.Prefix(int(p.Unit))
-	if err != nil {
-		return Result{}, fmt.Errorf("sworn: unit derivation: %w", err)
+	res := Result{
+		Operator:     prepared.payload.Operator,
+		Unit:         prepared.unit,
+		ObservedUnit: prepared.observed,
+		Prefix:       prepared.payload.Prefix,
+		Selector:     prepared.selector,
+		Testing:      testing,
+		RUA:          rua,
 	}
-	return Result{Operator: p.Operator, Unit: unit, Selector: selector}, nil
+	if testing {
+		// Non-nil so `err == nil` cannot mean pass. The Result is returned
+		// alongside it because a receiver still needs the operator and unit
+		// to emit policy.wouldbe=pass.
+		return res, ErrTestingMode
+	}
+	return res, nil
 }

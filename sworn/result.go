@@ -28,6 +28,12 @@ func Reason(err error) string {
 		return "bad_prefix"
 	case errors.Is(err, ErrBadValidity):
 		return "bad_validity"
+	case errors.Is(err, ErrTestingMode):
+		return "testing_mode"
+	case errors.Is(err, ErrUnauthorizedPrefix):
+		return "unauthorized_prefix"
+	case errors.Is(err, ErrPolicyUnitMismatch):
+		return "policy_unit_mismatch"
 	case errors.Is(err, ErrContentType):
 		return "bad_content_type"
 	case errors.Is(err, ErrNoSelector):
@@ -52,6 +58,10 @@ func AuthResult(err error) string {
 	switch {
 	case err == nil:
 		return "pass"
+	case errors.Is(err, ErrTestingMode):
+		// A testing operator has not accepted accountability, so a complete
+		// cryptographic success is still reported as none — never pass.
+		return "none"
 	case errors.Is(err, ErrBadSignature),
 		errors.Is(err, ErrOffPrefix),
 		errors.Is(err, ErrExpired),

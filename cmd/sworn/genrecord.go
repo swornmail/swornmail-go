@@ -44,7 +44,7 @@ func cmdGenrecord(args []string) int {
 	domain := fs.String("domain", "", "operator domain (required)")
 	selector := fs.String("selector", "", "selector of the key record (required)")
 	key := fs.String("key", "", "key file from `sworn keygen`, or a base64 public key (required)")
-	unit := fs.Int("unit", sworn.DefaultUnitPrefixLen, "reputation unit prefix length, 1-64")
+	unit := fs.Int("unit", sworn.DefaultUnitPrefixLen, "reputation unit prefix length; at least every --prefix length, at most 64")
 	testing := fs.Bool("testing", true, "publish t=y, observe-only; --testing=false stakes reputation")
 	rua := fs.String("rua", "", "aggregate report destination, mailto:<mailbox>@<domain>")
 	asJSON := fs.Bool("json", false, "JSON output, for driving a DNS provider's API")
@@ -124,11 +124,12 @@ func buildRecords(o genOptions) (recordSet, error) {
 		return recordSet{}, fmt.Errorf("%d prefixes: a policy record carries at most %d, and verifiers ignore the rest",
 			len(o.Prefixes), sworn.MaxPolicyPrefixes)
 	}
-	if o.Unit < 1 || o.Unit > sworn.MaxUnitPrefixLen {
-		return recordSet{}, fmt.Errorf("invalid --unit %d: must be 1-64; a value outside that range makes the record malformed rather than being clamped", o.Unit)
+	if o.Unit < sworn.MinPrefixLen || o.Unit > sworn.MaxUnitPrefixLen {
+		return recordSet{}, fmt.Errorf("invalid --unit %d: must be %d-64", o.Unit, sworn.MinPrefixLen)
 	}
 	seen := make(map[netip.Prefix]bool, len(o.Prefixes))
 	shortest := 128
+	longest := 0
 	for _, p := range o.Prefixes {
 		if err := sworn.ValidatePrefix(p); err != nil {
 			return recordSet{}, fmt.Errorf("invalid --prefix %s: %s", p, explainPrefix(p))
@@ -140,6 +141,12 @@ func buildRecords(o genOptions) (recordSet, error) {
 		if p.Bits() < shortest {
 			shortest = p.Bits()
 		}
+		if p.Bits() > longest {
+			longest = p.Bits()
+		}
+	}
+	if o.Unit < longest {
+		return recordSet{}, fmt.Errorf("invalid --unit %d: must be at least /%d so a reputation unit never extends outside an attested prefix", o.Unit, longest)
 	}
 	if err := validateRUA(o.RUA); err != nil {
 		return recordSet{}, err

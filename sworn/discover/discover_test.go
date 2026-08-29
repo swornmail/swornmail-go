@@ -196,6 +196,21 @@ func TestPTRCandidateWalk(t *testing.T) {
 	}
 }
 
+func TestPTRDomainCaseIsCanonicalized(t *testing.T) {
+	f := &fakeResolver{
+		ptr: map[string][]string{src.String(): {"MX.Mailer.Example.COM."}},
+		ip:  map[string][]netip.Addr{"mx.mailer.example.com": {src}},
+		txt: map[string][]string{"_prefixes._sworn.mailer.example.com": {policyTXT}},
+	}
+	res, err := discover(t, f)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if res.Operator != "mailer.example.com" {
+		t.Errorf("operator = %q, want canonical lowercase", res.Operator)
+	}
+}
+
 func TestFCrDNSFailureIsNone(t *testing.T) {
 	// PTR hostname does not forward-confirm to the source: not usable.
 	f := &fakeResolver{

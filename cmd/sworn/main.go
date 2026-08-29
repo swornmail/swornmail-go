@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -65,10 +66,10 @@ sender (set up a domain):
       Sign a Mode-2 token — for proving a key works, and for demos.
 
 receiver (check a sender):
-  sworn verify <token-b64url> --ip <addr> [--key <b64>] [--json]
+  sworn verify <token-b64url> --ip <addr> [--key <b64>] [--policy <txt>] [--json]
       Verify a Mode-2 token against a connecting source address. Without
-      --key, the operator key is fetched from DNS using the token's kid and
-      operator domain.
+      --key/--policy, the policy is fetched and authorized before the key
+      lookup. Supply both flags for a fully offline verification.
   sworn record <domain> [--selector <sel>] [--json]
       Fetch and lint a domain's SwornMail records: the policy record, and
       (with --selector) a key record.
@@ -111,8 +112,17 @@ func oneSwornRecord(txts []string) (string, bool) {
 	return found, n == 1
 }
 
+// resolver is the DNS surface shared by record, discovery, and verification.
+// Keeping it as an interface lets tests prove that local failures and
+// unauthorized policies issue no attacker-directed key query.
+type resolver interface {
+	LookupTXT(context.Context, string) ([]string, error)
+	LookupAddr(context.Context, string) ([]string, error)
+	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
+}
+
 // defaultResolver is the live resolver used by record/discover/verify.
-var defaultResolver = net.DefaultResolver
+var defaultResolver resolver = net.DefaultResolver
 
 // leadingPositional pulls a leading non-flag argument (the token or domain)
 // off the front so the remaining flags parse regardless of order — Go's flag

@@ -131,10 +131,15 @@ func TestBuildRecordsRejections(t *testing.T) {
 		"prefix IPv4":        func(o *genOptions) { o.Prefixes[0] = netip.MustParsePrefix("192.0.2.0/24") },
 		"unit zero":          func(o *genOptions) { o.Unit = 0 },
 		"unit over 64":       func(o *genOptions) { o.Unit = 65 },
+		"unit outside prefix": func(o *genOptions) {
+			o.Prefixes[0] = netip.MustParsePrefix("2001:db8:f00:1200::/56")
+			o.Unit = 48
+		},
 		"rua not mailto":     func(o *genOptions) { o.RUA = "https://example.net/reports" },
 		"rua no mailbox":     func(o *genOptions) { o.RUA = "mailto:@example.net" },
 		"rua bad domain":     func(o *genOptions) { o.RUA = "mailto:reports@exa mple.net" },
 		"rua with semicolon": func(o *genOptions) { o.RUA = "mailto:a@example.net;x=1" },
+		"rua with CRLF":      func(o *genOptions) { o.RUA = "mailto:a@example.net\r\nBcc:victim@example.net" },
 	} {
 		o := baseOptions(pub)
 		mutate(&o)
@@ -205,17 +210,17 @@ func TestRelativeName(t *testing.T) {
 	}
 }
 
-func TestNotesWarnOnCoarseUnitAndShortPrefix(t *testing.T) {
+func TestNotesWarnOnShortPrefix(t *testing.T) {
 	pub := testKey(t)
 	o := baseOptions(pub)
 	o.Prefixes = []netip.Prefix{netip.MustParsePrefix("2001:db8::/32")}
-	o.Unit = 24
+	o.Unit = 32
 	rs, err := buildRecords(o)
 	if err != nil {
 		t.Fatal(err)
 	}
 	all := strings.Join(rs.Notes, "\n")
-	for _, want := range []string{"coarser than", "shorter than /48", "observe-only"} {
+	for _, want := range []string{"shorter than /48", "observe-only"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("notes missing %q:\n%s", want, all)
 		}

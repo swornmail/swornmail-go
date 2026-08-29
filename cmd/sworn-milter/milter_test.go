@@ -48,7 +48,7 @@ func TestEvaluatePass(t *testing.T) {
 		"_prefixes._sworn.mailer.example.com": {"v=SWORN1; p=2001:db8:f00::/48; u=64"},
 	}, rev64src)
 	got := m.evaluate()
-	want := `mx.example; sworn=pass policy.mode=dns policy.op=mailer.example.com policy.unit="2001:db8:f00:1234::/64"`
+	want := `mx.example; sworn=pass policy.mode=dns policy.op=mailer.example.com policy.unit="2001:db8:f00:1234::/64" policy.observed="2001:db8:f00:1234::/64"`
 	if got != want {
 		t.Errorf("evaluate()\n got %q\nwant %q", got, want)
 	}
@@ -62,7 +62,7 @@ func TestEvaluateTestingModeIsNotPass(t *testing.T) {
 		"_prefixes._sworn.mailer.example.com": {"v=SWORN1; p=2001:db8:f00::/48; u=64; t=y"},
 	}, rev64src)
 	got := m.evaluate()
-	want := `mx.example; sworn=none policy.testing=y policy.wouldbe=pass policy.mode=dns policy.op=mailer.example.com policy.unit="2001:db8:f00:1234::/64"`
+	want := `mx.example; sworn=none policy.testing=y policy.wouldbe=pass policy.mode=dns policy.op=mailer.example.com policy.unit="2001:db8:f00:1234::/64" policy.observed="2001:db8:f00:1234::/64"`
 	if got != want {
 		t.Errorf("evaluate()\n got %q\nwant %q", got, want)
 	}

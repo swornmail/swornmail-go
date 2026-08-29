@@ -1,10 +1,16 @@
 // Command difftest is the SwornMail gate-B differential: it generates an
 // adversarial token corpus, evaluates each case with the Go reference
-// (sworn.Verify), pipes the same corpus to the Rust verifier via its difftest
-// binary, and reports any DISAGREEMENT. The load-bearing invariant is
-// accept/reject agreement (pass vs not-pass), plus operator/unit agreement on
-// pass; the draft calls reason-code order advisory, so a differing reason
+// pipes the same corpus to the Rust verifier via its difftest binary, and
+// reports any DISAGREEMENT. The load-bearing invariant is agreement on the
+// Authentication-Results value, plus operator/unit/observed-unit agreement on
+// a pass; the draft calls reason-code order advisory, so a differing reason
 // among rejections is tallied, not failed.
+//
+// Cases carrying a policy record exercise the complete path — local checks,
+// policy authorization, then the signature — so the authorization contract is
+// differentially tested rather than only unit-tested on each side. Cases
+// without one exercise the signature-only primitive the frozen token vectors
+// use.
 //
 // Usage: difftest --rust <path-to-rust-difftest-binary> [--fuzz N] [--report FILE]
 package main
@@ -14,6 +20,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"net/netip"
@@ -28,6 +35,9 @@ import (
 )
 
 const selector = "2026a"
+
+// dumpFuzz, when set via --dump, prints one fuzz case's bytes for triage.
+var dumpFuzz string
 
 var (
 	priv   ed25519.PrivateKey
@@ -103,13 +113,18 @@ type caseT struct {
 	token  []byte
 	source string
 	now    int64
+	// policy is the _prefixes._sworn TXT to authorize against. Empty means
+	// signature-only evaluation, matching the frozen token vectors.
+	policy string
 }
 
 func main() {
 	rustBin := flag.String("rust", "", "path to the rust difftest binary (required)")
 	fuzzN := flag.Int("fuzz", 3000, "number of byte-level fuzz cases")
 	reportPath := flag.String("report", "", "write a markdown report to this path")
+	dump := flag.String("dump", "", "print the bytes of this fuzz case to stderr, for triage")
 	flag.Parse()
+	dumpFuzz = *dump
 	if *rustBin == "" {
 		fmt.Fprintln(os.Stderr, "difftest: --rust <binary> is required")
 		os.Exit(2)
@@ -126,18 +141,32 @@ func main() {
 	cases := generate(*fuzzN)
 
 	// Go evaluation.
-	type result struct{ reason, op, unit string }
+	type result struct{ authres, reason, op, unit, observed string }
 	goRes := make(map[string]result, len(cases))
 	for _, c := range cases {
 		src, err := netip.ParseAddr(c.source)
 		if err != nil {
-			goRes[c.name] = result{"bad_source", "", ""}
+			goRes[c.name] = result{authres: "permerror", reason: "bad_source"}
 			continue
 		}
-		res, verr := sworn.Verify(c.token, pub, src, time.Unix(c.now, 0).UTC())
-		r := result{reason: sworn.Reason(verr)}
-		if verr == nil {
-			r.op, r.unit = res.Operator, res.Unit.String()
+		now := time.Unix(c.now, 0).UTC()
+		var res sworn.Result
+		var verr error
+		if c.policy == "" {
+			res, verr = sworn.VerifySignatureOnly(c.token, pub, src, now)
+		} else {
+			policy, perr := sworn.ParsePolicyRecord(c.policy)
+			if perr != nil {
+				goRes[c.name] = result{authres: "permerror", reason: "policy_record_invalid"}
+				continue
+			}
+			res, verr = sworn.Verify(c.token, pub, policy, src, now)
+		}
+		r := result{authres: sworn.AuthResult(verr), reason: sworn.Reason(verr)}
+		// A testing outcome still names the operator (it is a real
+		// verification), which is why it carries the properties too.
+		if verr == nil || errors.Is(verr, sworn.ErrTestingMode) {
+			r.op, r.unit, r.observed = res.Operator, res.Unit.String(), res.ObservedUnit.String()
 		}
 		goRes[c.name] = r
 	}
@@ -146,7 +175,8 @@ func main() {
 	var in bytes.Buffer
 	fmt.Fprintf(&in, "%s\n", hex.EncodeToString(pub))
 	for _, c := range cases {
-		fmt.Fprintf(&in, "%s\t%s\t%s\t%d\n", c.name, hex.EncodeToString(c.token), c.source, c.now)
+		fmt.Fprintf(&in, "%s\t%s\t%s\t%d\t%s\n",
+			c.name, hex.EncodeToString(c.token), c.source, c.now, c.policy)
 	}
 	cmd := exec.Command(*rustBin)
 	cmd.Stdin = &in
@@ -160,13 +190,13 @@ func main() {
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
-		f := strings.SplitN(sc.Text(), "\t", 4)
-		if len(f) < 2 {
+		f := strings.SplitN(sc.Text(), "\t", 6)
+		if len(f) < 3 {
 			continue
 		}
-		r := result{reason: f[1]}
-		if len(f) >= 4 {
-			r.op, r.unit = f[2], f[3]
+		r := result{authres: f[1], reason: f[2]}
+		if len(f) >= 6 {
+			r.op, r.unit, r.observed = f[3], f[4], f[5]
 		}
 		rustRes[f[0]] = r
 	}
@@ -176,14 +206,15 @@ func main() {
 	reasonExact := 0
 	for _, c := range cases {
 		g, r := goRes[c.name], rustRes[c.name]
-		gPass, rPass := g.reason == "pass", r.reason == "pass"
+		gPass, rPass := g.authres == "pass", r.authres == "pass"
 		switch {
-		case gPass != rPass:
+		case g.authres != r.authres:
 			divergences = append(divergences, fmt.Sprintf(
-				"ACCEPT/REJECT  %-28s go=%s rust=%s", c.name, g.reason, r.reason))
-		case gPass && (g.op != r.op || g.unit != r.unit):
+				"AUTHRESULT     %-32s go=%s rust=%s", c.name, g.authres, r.authres))
+		case g.op != r.op || g.unit != r.unit || g.observed != r.observed:
 			divergences = append(divergences, fmt.Sprintf(
-				"RESULT         %-28s go=(%s,%s) rust=(%s,%s)", c.name, g.op, g.unit, r.op, r.unit))
+				"PROPERTIES     %-32s go=(%s,%s,%s) rust=(%s,%s,%s)",
+				c.name, g.op, g.unit, g.observed, r.op, r.unit, r.observed))
 		}
 		if g.reason == r.reason {
 			reasonExact++
@@ -192,9 +223,15 @@ func main() {
 		}
 	}
 
+	authorized := 0
+	for _, c := range cases {
+		if c.policy != "" {
+			authorized++
+		}
+	}
 	summary := fmt.Sprintf(
-		"cases=%d  accept/reject+result divergences=%d  exact-reason-agreement=%d/%d (%.1f%%)",
-		len(cases), len(divergences), reasonExact, len(cases),
+		"cases=%d (%d policy-authorized)  authresult+property divergences=%d  exact-reason-agreement=%d/%d (%.1f%%)",
+		len(cases), authorized, len(divergences), reasonExact, len(cases),
 		100*float64(reasonExact)/float64(len(cases)))
 	fmt.Println(summary)
 	for _, d := range divergences {
@@ -212,7 +249,7 @@ func main() {
 func writeReport(path, summary string, cases []caseT, divergences, advisory []string, reasonExact int) {
 	var b strings.Builder
 	b.WriteString("# Gate B — Go/Rust differential report\n\n")
-	b.WriteString("Mechanical differential: every case verified by both `swornmail-go` (`sworn.Verify`) and the independent Rust verifier; a disagreement on accept/reject, or on operator/unit for a pass, is a finding. Reason-string differences among rejections are advisory (draft leaves reason-code order unspecified) and are tallied, not failed.\n\n")
+	b.WriteString("Mechanical differential: every case verified by both `swornmail-go` and the independent Rust verifier. Cases carrying a policy record run the complete path (local checks, policy authorization, signature); the rest run the signature-only primitive the frozen token vectors use. A disagreement on the Authentication-Results value, or on operator/unit/observed-unit, is a finding. Reason-string differences among rejections are advisory (draft leaves reason-code order unspecified) and are tallied, not failed.\n\n")
 	fmt.Fprintf(&b, "**Result:** %s\n\n", summary)
 	if len(divergences) == 0 {
 		b.WriteString("**No accept/reject or result divergences.** The two implementations agree on the pass/reject decision and on operator/unit for every case in the corpus.\n\n")

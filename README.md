@@ -10,7 +10,9 @@ attestation for email senders.
   deterministic CBOR — sign and verify per `draft-kafedzhy-swornmail-01`,
   with protected `kid`/content-type binding, canonical/range-bounded
   prefixes, source-eligibility rules, fixed 300s skew, and operator-domain
-  validation. `ParseUnverified` exposes the pre-DNS syntax checks.
+  validation. `PrepareVerification` completes every local check before DNS;
+  its staged `Authorize` flow requires the policy to cover the signed prefix
+  before a receiver fetches the key.
 - **`_sworn` records** (`sworn`): key records (`ParseRecord`) and policy
   records (`ParsePolicyRecord`), with duplicate-tag rejection.
 - **Mode-1 discovery** (`sworn/discover`): DNS-only discovery — reverse-tree
@@ -35,9 +37,13 @@ attestation for email senders.
   and fails on any disagreement. The [Rust verifier](https://github.com/swornmail/swornmail)
   passes the same file.
 
-A complete Ed25519 token is 174 bytes. Verification is stateless; replay
-outside the attested prefix is impossible by construction, so no
-anti-replay state exists.
+A complete Ed25519 token is 174 bytes. Verification is stateless. Replay is
+limited to the signed prefix and remains attributable to its operator. A broad
+signed claim alone is not proof that a shared-hosting tenant controls the
+provider aggregate, so reputation attaches to the *observed unit* — the source
+`/64`, computed from the connection rather than from anything the claimant
+wrote — unless the receiver has independent evidence of a wider control
+boundary. It is reported as `policy.observed` in Authentication-Results.
 
 ## Planned
 
@@ -80,7 +86,7 @@ connection; `sworn sign` issues one so you can prove the key works:
 ```
 TOKEN=$(./sworn sign --key 2026a.key --selector 2026a \
                      --domain mailer.example.com --prefix 2001:db8:f00::/48)
-./sworn verify "$TOKEN" --ip 2001:db8:f00::25       # fetches your key record
+./sworn verify "$TOKEN" --ip 2001:db8:f00::25       # policy first, then key
 ```
 
 ## Use
@@ -92,14 +98,53 @@ go run ./cmd/sworn keygen --selector 2026a
 go run ./cmd/sworn genrecord --domain example.com --selector 2026a --key 2026a.key --prefix <p>
 go run ./cmd/sworn genrecord ... --json    # feed a DNS provider's API
 go run ./cmd/sworn sign --key 2026a.key --selector 2026a --domain example.com --prefix <p>
-go run ./cmd/sworn verify <token> --ip <addr> --key <b64>
+go run ./cmd/sworn verify <token> --ip <addr>
+go run ./cmd/sworn verify <token> --ip <addr> --policy '<policy TXT>' --key <b64> # fully offline
 go run ./cmd/sworn record example.com --selector 2026a
 go run ./cmd/sworn discover --ip <addr>
 go run ./cmd/sworn-milter --listen unix:/var/spool/postfix/sworn.sock
 ```
 
-Requires Go 1.22+. The `-01` wire format is frozen (v1 vectors); pin exact
+For library integrations, the safe live-DNS order is:
+
+```go
+pending, err := sworn.PrepareVerification(token, source, now) // no DNS
+// fetch and parse _prefixes._sworn.<pending.Operator()>
+authorized, err := pending.Authorize(policy)                  // no key query yet
+// fetch and parse <pending.Selector()>._sworn.<pending.Operator()>
+result, err := authorized.VerifySignature(key)
+
+switch {
+case errors.Is(err, sworn.ErrTestingMode):
+    // t=y: report sworn=none policy.wouldbe=pass. `result` is populated,
+    // but nothing is staked. This is an error, not a flag on a nil-error
+    // result, so `err == nil` can never mean pass for a testing operator.
+case err != nil:
+    // sworn.AuthResult(err) / sworn.Reason(err); attribute nothing to anyone.
+default:
+    // Key reputation on result.ObservedUnit, NOT result.Unit.
+}
+```
+
+`result.Unit` is the aggregation the operator *asked for*. `result.ObservedUnit`
+is the source `/64` this connection actually corroborated, and is the reputation
+key unless you hold independent evidence that the operator controls the whole
+attested prefix. They are equal at the default `u=64`.
+
+When both records are already available, `sworn.Verify` is the complete
+no-I/O helper and requires the policy argument. Only conformance tooling
+should use the deliberately named `sworn.VerifySignatureOnly` primitive,
+which does not apply DNS policy and must never be reported as a protocol pass.
+
+Requires Go 1.24+. The `-01` wire format is frozen (v1 vectors); pin exact
 versions until v1.0.
+
+Record *acceptance* was tightened within `-01`: a policy `u=` coarser than
+any prefix in the same record, a `rua=` outside a conservative ASCII
+`mailto:<dot-atom>@<domain>`, and any octet outside printable US-ASCII in a
+record are now malformed. Token bytes are unchanged and every pre-existing
+vector still passes byte-identically. `sworn genrecord` never emitted any of
+those shapes; an operator who hand-wrote one must fix the record.
 
 ## Security
 

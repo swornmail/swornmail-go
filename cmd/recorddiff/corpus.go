@@ -72,6 +72,67 @@ func generate() ([]policyCase, map[string]string) {
 		add("syntax-"+name, record, src)
 	}
 
+	// The rua grammar and the control-character rule, both tightened when
+	// Mode-2 authorization landed. A report destination is where a receiver
+	// sends mail, so a parser differential here is a differential in who gets
+	// mailed — the reason these are compared rather than trusted per side.
+	for name, record := range map[string]string{
+		"rua-plain":            "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a@b.example",
+		"rua-dot-atom":         "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a.b+tag@b.example",
+		"rua-specials":         "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:!#$%&'*+-/=?^_`{|}~@b.example",
+		"rua-no-scheme":        "v=SWORN1; p=2001:db8:f00::/48; rua=a@b.example",
+		"rua-wrong-scheme":     "v=SWORN1; p=2001:db8:f00::/48; rua=https://evil.example/collect",
+		"rua-scheme-only":      "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:",
+		"rua-empty":            "v=SWORN1; p=2001:db8:f00::/48; rua=",
+		"rua-no-at":            "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:nobody",
+		"rua-two-at":           "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a@b@c.example",
+		"rua-empty-local":      "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:@b.example",
+		"rua-leading-dot":      "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:.a@b.example",
+		"rua-trailing-dot":     "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a.@b.example",
+		"rua-double-dot":       "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a..b@b.example",
+		"rua-recipient-list":   "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a@b.example,c@d.example",
+		"rua-uri-parameter":    "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a@b.example?subject=x",
+		"rua-quoted-local":     "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:\"a b\"@b.example",
+		"rua-bad-domain":       "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a@-bad.example",
+		"rua-empty-label":      "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a@b..example",
+		"rua-crlf-injection":   "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a@b.example\r\nBcc:victim@example.net",
+		"rua-header-injection": "v=SWORN1; p=2001:db8:f00::/48; rua=mailto:a@b.example%0aBcc:victim@example.net",
+		"ctl-nul":              "v=SWORN1; p=2001:db8:f00::/48\x00; u=64",
+		"ctl-cr":               "v=SWORN1;\r p=2001:db8:f00::/48",
+		"ctl-lf":               "v=SWORN1;\n p=2001:db8:f00::/48",
+		"ctl-del":              "v=SWORN1; p=2001:db8:f00::/48\x7f",
+		"ctl-nul-leading":      "\x00v=SWORN1; p=2001:db8:f00::/48",
+		// The bytes three runtimes classify differently. Go's unicode.IsSpace
+		// covers NBSP and U+3000, Lua's %s is byte-wise, Rust's
+		// is_ascii_whitespace excludes VT and includes FF. Under the printable
+		// -ASCII rule every one of these is rejected by every implementation,
+		// which is the point of stating the rule as an octet range.
+		"ws-vt":             "v=SWORN1; p=2001:db8:f00::/48; x=a\x0bb",
+		"ws-ff":             "v=SWORN1; p=2001:db8:f00::/48; x=a\x0cb",
+		"ws-nbsp":           "v=SWORN1; p=2001:db8:f00::/48; x=a\u00a0b",
+		"ws-ideographic":    "v=SWORN1; p=2001:db8:f00::/48; x=a\u3000b",
+		"ws-nel":            "v=SWORN1; p=2001:db8:f00::/48; x=a\u0085b",
+		"ws-nbsp-trailing":  "v=SWORN1; p=2001:db8:f00::/48; u=64\u00a0",
+		"ws-nbsp-in-prefix": "v=SWORN1; p=2001:db8:f00::/48\u00a0",
+		"ws-tab-in-value":   "v=SWORN1; p=2001:db8:f00::/48; x=a\tb",
+		// HTAB between tags is what a hand-edited zone file produces: stripped,
+		// not rejected. All three must agree, or an operator's record parses
+		// on one verifier and not another.
+		"ws-tab-between-tags": "v=SWORN1;\tp=2001:db8:f00::/48",
+		"ws-tab-around-value": "v=SWORN1; p=\t2001:db8:f00::/48\t",
+		"ws-space-in-value":   "v=SWORN1; p=2001:db8:f00::/48; x=a b",
+		"high-bit-byte":       "v=SWORN1; p=2001:db8:f00::/48; x=\u00ff",
+		"esc-in-value":        "v=SWORN1; p=2001:db8:f00::/48; x=a\x1bb",
+		// Empty p= elements: skipped, not counted, not rejected. All three
+		// must agree, because this decides how many prefixes authorize.
+		"p-trailing-comma": "v=SWORN1; p=2001:db8:f00::/48,",
+		"p-leading-comma":  "v=SWORN1; p=,2001:db8:f00::/48",
+		"p-double-comma":   "v=SWORN1; p=2001:db8:f00::/48,,2001:db8:f01::/48",
+		"p-only-commas":    "v=SWORN1; p=,,,",
+	} {
+		add("guard-"+name, record, src)
+	}
+
 	// Unit values, including the ones a lenient numeric parser would accept.
 	for name, unit := range map[string]string{
 		"zero": "0", "over": "65", "negative": "-1", "plus": "+5",
