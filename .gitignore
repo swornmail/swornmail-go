@@ -1,8 +1,18 @@
 /difftest
 /recorddiff
-/sworn
 /sworn-milter
 /genvectors
+
+# `go build -o bin/ ./cmd/...` output. Not `/sworn`: that pattern also
+# matches the sworn/ package directory, and silently kept a new source file
+# out of every commit.
+/bin/
+# Where `go build -o sworn ./cmd/sworn` puts the binary: inside the package
+# directory, since sworn/ already exists.
+/sworn/sworn
+
+# Signing keys written by `sworn keygen` when run from the repository root.
+*.key
 
 # Local agent tooling state. Never belongs in a public repository.
 .omc/
