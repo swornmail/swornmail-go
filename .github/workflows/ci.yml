@@ -1,0 +1,32 @@
+name: CI
+
+# Builds, vets and tests every package on each push to main and each pull
+# request. Until this existed only the public-boundary check ran here, so a
+# source file that never reached a commit left cmd/sworn-milter unbuildable
+# on main with nothing failing.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...

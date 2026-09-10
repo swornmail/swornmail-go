@@ -56,19 +56,19 @@ You need a domain, the IPv6 prefix your mail leaves from, and the ability to
 add two TXT records.
 
 ```
-go build -o sworn ./cmd/sworn
+go build -o bin/sworn ./cmd/sworn
 
 # 1. Generate a signing key. Writes 2026a.key (mode 0600) — back it up.
-./sworn keygen
+./bin/sworn keygen
 
 # 2. Generate the records for your domain and prefix.
-./sworn genrecord --domain mailer.example.com --selector 2026a \
+./bin/sworn genrecord --domain mailer.example.com --selector 2026a \
                   --key 2026a.key --prefix 2001:db8:f00::/48
 
 # 3. Publish the two TXT records it prints (zone-file and DNS-panel forms
 #    are both shown), then check them:
-./sworn record mailer.example.com --selector 2026a
-./sworn discover --ip <one of your MTA's IPv6 addresses>
+./bin/sworn record mailer.example.com --selector 2026a
+./bin/sworn discover --ip <one of your MTA's IPv6 addresses>
 # → sworn=none testing=y wouldbe=pass mode=dns op=mailer.example.com …
 ```
 
@@ -84,9 +84,9 @@ That is the whole Mode-1 deployment. Mode 2 additionally signs a token per
 connection; `sworn sign` issues one so you can prove the key works:
 
 ```
-TOKEN=$(./sworn sign --key 2026a.key --selector 2026a \
+TOKEN=$(./bin/sworn sign --key 2026a.key --selector 2026a \
                      --domain mailer.example.com --prefix 2001:db8:f00::/48)
-./sworn verify "$TOKEN" --ip 2001:db8:f00::25       # policy first, then key
+./bin/sworn verify "$TOKEN" --ip 2001:db8:f00::25       # policy first, then key
 ```
 
 ## Use
