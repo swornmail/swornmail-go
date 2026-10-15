@@ -162,6 +162,13 @@ is the source `/64` this connection actually corroborated, and is the reputation
 key unless you hold independent evidence that the operator controls the whole
 attested prefix. They are equal at the default `u=64`.
 
+Look record names up with a trailing dot (`_prefixes._sworn.example.com.`).
+Without it, the resolver also tries each search domain in `resolv.conf` and
+returns the error from the last attempt, so a SERVFAIL comes back as NXDOMAIN
+and you'd report `none` instead of `temperror`. `discover.Discover` already
+does this, which means a custom `discover.Resolver` receives names ending in a
+dot and should match them that way.
+
 When both records are already available, `sworn.Verify` is the complete
 no-I/O helper and requires the policy argument. Only conformance tooling
 should use the deliberately named `sworn.VerifySignatureOnly` primitive,

@@ -5,20 +5,25 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
-// fakeResolver serves canned answers so discovery tests need no network.
+// fakeResolver serves canned answers so discovery tests need no network. Maps
+// are keyed without the trailing dot; names records each name as it was sent.
 type fakeResolver struct {
 	txt   map[string][]string
 	ptr   map[string][]string
 	ip    map[string][]netip.Addr
 	fail  map[string]bool // name -> temporary failure
 	calls int
+	names []string
 }
 
 func (f *fakeResolver) LookupTXT(_ context.Context, name string) ([]string, error) {
 	f.calls++
+	f.names = append(f.names, name)
+	name = strings.TrimSuffix(name, ".")
 	if f.fail[name] {
 		return nil, &net.DNSError{Err: "timeout", IsTimeout: true}
 	}
@@ -40,7 +45,8 @@ func (f *fakeResolver) LookupAddr(_ context.Context, addr string) ([]string, err
 
 func (f *fakeResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
 	f.calls++
-	v, ok := f.ip[host]
+	f.names = append(f.names, host)
+	v, ok := f.ip[strings.TrimSuffix(host, ".")]
 	if !ok {
 		return nil, &net.DNSError{Err: "nxdomain", IsNotFound: true}
 	}
@@ -256,6 +262,29 @@ func TestQueryBudgetNotExceeded(t *testing.T) {
 	}
 	if f.calls > MaxQueries {
 		t.Errorf("made %d queries, exceeds budget %d", f.calls, MaxQueries)
+	}
+}
+
+// Every name must go out with a trailing dot. Otherwise the resolver walks the
+// resolv.conf search list, which can turn a SERVFAIL into NXDOMAIN and
+// temperror into none (see fqdn).
+func TestQueriesAreFullyQualified(t *testing.T) {
+	f := &fakeResolver{
+		ptr: map[string][]string{src.String(): {"mx.eu.mailer.example.com."}},
+		ip:  map[string][]netip.Addr{"mx.eu.mailer.example.com": {src}},
+		txt: map[string][]string{"_prefixes._sworn.mailer.example.com": {policyTXT}},
+	}
+	if _, err := discover(t, f); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	// rev64, rev48, AAAA, then three candidates; the PTR query takes an address.
+	if len(f.names) != 6 {
+		t.Fatalf("queried %d names, want 6: %v", len(f.names), f.names)
+	}
+	for _, name := range f.names {
+		if !strings.HasSuffix(name, ".") {
+			t.Errorf("queried relative name %q, want it fully qualified", name)
+		}
 	}
 }
 

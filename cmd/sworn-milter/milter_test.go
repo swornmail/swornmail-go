@@ -9,11 +9,12 @@ import (
 	"time"
 )
 
-// fakeResolver serves canned TXT answers; everything else is NXDOMAIN.
+// fakeResolver serves canned TXT answers, keyed without the trailing dot.
+// Everything else is NXDOMAIN.
 type fakeResolver struct{ txt map[string][]string }
 
 func (f fakeResolver) LookupTXT(_ context.Context, name string) ([]string, error) {
-	if v, ok := f.txt[name]; ok {
+	if v, ok := f.txt[strings.TrimSuffix(name, ".")]; ok {
 		return v, nil
 	}
 	return nil, &net.DNSError{IsNotFound: true}

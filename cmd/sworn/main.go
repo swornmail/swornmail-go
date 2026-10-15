@@ -124,6 +124,12 @@ type resolver interface {
 // defaultResolver is the live resolver used by record/discover/verify.
 var defaultResolver resolver = net.DefaultResolver
 
+// absolute adds the trailing dot so lookups skip the resolv.conf search list,
+// which can turn a SERVFAIL into NXDOMAIN (see fqdn in sworn/discover).
+func absolute(qname string) string {
+	return strings.TrimSuffix(qname, ".") + "."
+}
+
 // leadingPositional pulls a leading non-flag argument (the token or domain)
 // off the front so the remaining flags parse regardless of order — Go's flag
 // package otherwise stops at the first positional.

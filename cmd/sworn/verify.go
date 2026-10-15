@@ -208,7 +208,7 @@ func fetchKey(selector, operator string) (ed25519.PublicKey, error) {
 func fetchSingleRecord(qname, kind string) (string, error) {
 	ctx, cancel := dnsContext()
 	defer cancel()
-	txts, err := defaultResolver.LookupTXT(ctx, qname)
+	txts, err := defaultResolver.LookupTXT(ctx, absolute(qname))
 	if err != nil {
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
