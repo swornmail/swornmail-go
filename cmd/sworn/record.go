@@ -71,7 +71,7 @@ func lintKey(selector, domain string) *keyLint {
 	out := &keyLint{QName: qname}
 	ctx, cancel := dnsContext()
 	defer cancel()
-	txts, err := defaultResolver.LookupTXT(ctx, qname)
+	txts, err := defaultResolver.LookupTXT(ctx, absolute(qname))
 	if err != nil {
 		out.Error = err.Error()
 		return out
@@ -98,7 +98,7 @@ func lintPolicy(domain string) *policyLint {
 	out := &policyLint{QName: qname}
 	ctx, cancel := dnsContext()
 	defer cancel()
-	txts, err := defaultResolver.LookupTXT(ctx, qname)
+	txts, err := defaultResolver.LookupTXT(ctx, absolute(qname))
 	if err != nil {
 		out.Error = err.Error()
 		return out

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,8 +150,9 @@ func (s *stubResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.A
 	return answer(s.ip, host)
 }
 
+// answer looks key up in m, which uses genrecord's names (no trailing dot).
 func answer[T any](m map[string][]T, key string) ([]T, error) {
-	v, ok := m[key]
+	v, ok := m[strings.TrimSuffix(key, ".")]
 	if !ok {
 		return nil, &net.DNSError{Err: "nxdomain", IsNotFound: true}
 	}

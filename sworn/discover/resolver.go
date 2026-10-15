@@ -15,11 +15,21 @@ import (
 
 // Resolver is the DNS surface discovery needs. *net.Resolver satisfies it
 // directly; tests inject a fake so no network is required. Implementations
-// are expected to enforce their own CNAME chain-length limits.
+// are expected to enforce their own CNAME chain-length limits. Discovery
+// always passes names with a trailing dot.
 type Resolver interface {
 	LookupTXT(ctx context.Context, name string) ([]string, error)
 	LookupAddr(ctx context.Context, addr string) ([]string, error)
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
+// fqdn adds the trailing dot. Without it, the resolver also tries every
+// search domain in resolv.conf and returns the error from the last try, so a
+// SERVFAIL on the real name comes back as NXDOMAIN for name.<search> and we
+// report none instead of temperror. It also costs extra queries, and a zone
+// under the search domain could answer for the operator's.
+func fqdn(name string) string {
+	return strings.TrimSuffix(name, ".") + "."
 }
 
 // MaxQueries bounds total DNS work for one discovery (I-D -01 §Discovery):

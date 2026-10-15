@@ -25,9 +25,22 @@ type swornMilter struct {
 	haveSource bool
 	// stripIdx holds the per-name (1-based) positions of inbound
 	// Authentication-Results fields that claim our authserv-id and must be
-	// removed at the trust boundary (RFC 8601 §5).
+	// removed at the trust boundary (RFC 8601 §5). Both are per message and
+	// reset in MailFrom.
 	stripIdx []int
 	arSeen   int
+}
+
+// newServer builds the milter server. main and the session tests share it, so
+// the tests run against the protocol options Postfix actually negotiates.
+func newServer(authservID string, r discover.Resolver, dnsTimeout time.Duration) *milter.Server {
+	return &milter.Server{
+		NewMilter: func() milter.Milter {
+			return &swornMilter{authservID: authservID, resolver: r, dnsTimeout: dnsTimeout}
+		},
+		Actions:  milter.OptAddHeader | milter.OptChangeHeader,
+		Protocol: milter.OptNoBody, // skip body chunks; we act on headers + end of message
+	}
 }
 
 func (s *swornMilter) Connect(host, family string, port uint16, addr net.IP, _ *milter.Modifier) (milter.Response, error) {
@@ -37,10 +50,18 @@ func (s *swornMilter) Connect(host, family string, port uint16, addr net.IP, _ *
 	return milter.RespContinue, nil
 }
 
+// MailFrom starts a new message. Header positions are counted per message;
+// a count left over from an aborted message would point the delete at the
+// wrong header and let a forged result through.
+func (s *swornMilter) MailFrom(string, *milter.Modifier) (milter.Response, error) {
+	s.stripIdx, s.arSeen = nil, 0
+	return milter.RespContinue, nil
+}
+
 func (s *swornMilter) Header(name, value string, _ *milter.Modifier) (milter.Response, error) {
 	if strings.EqualFold(name, "Authentication-Results") {
 		s.arSeen++
-		if strings.EqualFold(authservIDOf(value), s.authservID) {
+		if claimsID(value, s.authservID) {
 			s.stripIdx = append(s.stripIdx, s.arSeen)
 		}
 	}
@@ -55,7 +76,11 @@ func (s *swornMilter) Body(m *milter.Modifier) (milter.Response, error) {
 	}
 	// Prepend our result. Errors here must not fail the message (fail-open).
 	_ = m.InsertHeader(0, "Authentication-Results", s.evaluate())
-	return milter.RespAccept, nil
+	// Return continue, not accept. The MTA treats them the same at end of
+	// message, but go-milter throws the milter away after anything other than
+	// continue, and the new one never sees Connect, so every later message on
+	// the connection would be stamped none.
+	return milter.RespContinue, nil
 }
 
 // evaluate runs discovery for the captured source and formats the AR value.
@@ -67,11 +92,4 @@ func (s *swornMilter) evaluate() string {
 	defer cancel()
 	res, err := discover.Discover(ctx, s.resolver, s.source, discover.Options{})
 	return discover.AuthResults(s.authservID, res, err)
-}
-
-// authservIDOf returns the authserv-id (the token before the first ';') of an
-// Authentication-Results field value.
-func authservIDOf(value string) string {
-	id, _, _ := strings.Cut(value, ";")
-	return strings.TrimSpace(id)
 }

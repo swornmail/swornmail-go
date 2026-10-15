@@ -5,12 +5,15 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/swornmail/swornmail-go/sworn"
 )
 
+// verificationResolver records each name as it was sent. txt is keyed
+// without the trailing dot.
 type verificationResolver struct {
 	txt     map[string][]string
 	queries []string
@@ -18,7 +21,7 @@ type verificationResolver struct {
 
 func (r *verificationResolver) LookupTXT(_ context.Context, name string) ([]string, error) {
 	r.queries = append(r.queries, name)
-	return r.txt[name], nil
+	return r.txt[strings.TrimSuffix(name, ".")], nil
 }
 
 func (r *verificationResolver) LookupAddr(context.Context, string) ([]string, error) {
@@ -84,7 +87,7 @@ func TestVerifyAuthorizesPolicyBeforeKeyLookup(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("valid verification exit = %d", code)
 	}
-	want := []string{"_prefixes._sworn.mailer.example.com", "2026a._sworn.mailer.example.com"}
+	want := []string{"_prefixes._sworn.mailer.example.com.", "2026a._sworn.mailer.example.com."}
 	if len(r.queries) != len(want) || r.queries[0] != want[0] || r.queries[1] != want[1] {
 		t.Fatalf("query order = %v, want %v", r.queries, want)
 	}
@@ -101,7 +104,7 @@ func TestVerifyUnauthorizedPolicySuppressesKeyQuery(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("unauthorized policy exit = %d, want permerror", code)
 	}
-	if len(r.queries) != 1 || r.queries[0] != "_prefixes._sworn.mailer.example.com" {
+	if len(r.queries) != 1 || r.queries[0] != "_prefixes._sworn.mailer.example.com." {
 		t.Fatalf("unauthorized token queried beyond policy: %v", r.queries)
 	}
 }
@@ -134,7 +137,7 @@ func TestVerifyOfflineKeyStillRequiresPolicy(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("offline key with unauthorized policy exit = %d, want permerror", code)
 	}
-	if len(r.queries) != 1 || r.queries[0] != "_prefixes._sworn.mailer.example.com" {
+	if len(r.queries) != 1 || r.queries[0] != "_prefixes._sworn.mailer.example.com." {
 		t.Fatalf("policy query not issued exactly once: %v", r.queries)
 	}
 }

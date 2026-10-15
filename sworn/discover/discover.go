@@ -235,7 +235,7 @@ func (d *discovery) lookupTXT(name string) ([]string, error) {
 	if err := d.spend(); err != nil {
 		return nil, err
 	}
-	return d.r.LookupTXT(d.ctx, name)
+	return d.r.LookupTXT(d.ctx, fqdn(name))
 }
 
 func (d *discovery) lookupAddr(source netip.Addr) ([]string, error) {
@@ -249,7 +249,7 @@ func (d *discovery) lookupNetIP(host string) ([]netip.Addr, error) {
 	if err := d.spend(); err != nil {
 		return nil, err
 	}
-	return d.r.LookupNetIP(d.ctx, "ip6", host)
+	return d.r.LookupNetIP(d.ctx, "ip6", fqdn(host))
 }
 
 // isNotFound distinguishes NXDOMAIN / no-such-host (a definite negative that
