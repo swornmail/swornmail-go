@@ -1,14 +1,19 @@
 // Command sworn-milter is a Postfix/Sendmail milter that runs SwornMail
 // Mode-1 (DNS-only) discovery on each connection and stamps an
-// Authentication-Results `sworn=` result on the message. It adds signal only:
-// it is strictly fail-open and never rejects mail.
+// Authentication-Results `sworn=` result on the message, removing inbound
+// results that claim its authserv-id. It is strictly fail-open and never
+// rejects mail.
 //
-// Postfix setup (main.cf):
+// Postfix setup (main.cf, Postfix 3.0 or later):
 //
-//	smtpd_milters = unix:/var/spool/postfix/sworn.sock
-//	milter_default_action = accept
+//	smtpd_milters = { inet:127.0.0.1:10025, default_action=accept }
 //
-// then run: sworn-milter --listen unix:/var/spool/postfix/sworn.sock
+// then run sworn-milter, which listens there by default. Content filters
+// such as amavis often take port 10025 too; if it's in use, pick another with
+// --listen and use the same port in smtpd_milters. Keep
+// default_action=accept inside the braces: it makes this milter fail open
+// without touching the others, where the global milter_default_action would
+// make every milter fail open. See https://swornmail.dev/milter/.
 package main
 
 import (

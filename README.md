@@ -102,35 +102,54 @@ go run ./cmd/sworn verify <token> --ip <addr>
 go run ./cmd/sworn verify <token> --ip <addr> --policy '<policy TXT>' --key <b64> # fully offline
 go run ./cmd/sworn record example.com --selector 2026a
 go run ./cmd/sworn discover --ip <addr>
-go run ./cmd/sworn-milter --listen unix:/var/spool/postfix/sworn.sock
+go run ./cmd/sworn-milter --authserv-id mx.example.com  # listens on tcp:127.0.0.1:10025
 ```
 
 ### Running the milter under Postfix
 
+The full walkthrough is at [swornmail.dev/milter](https://swornmail.dev/milter/).
+
 ```
-# main.cf
-smtpd_milters         = unix:/var/spool/postfix/sworn.sock
-milter_default_action = accept
+# main.cf (Postfix 3.0 or later)
+smtpd_milters = { inet:127.0.0.1:10025, default_action=accept }
 ```
 
-- **`milter_default_action = accept` is what makes the deployment fail-open.**
-  The milter itself never rejects, but if it is stopped or times out, Postfix
-  applies its default action: `tempfail`, or `shutdown` since Postfix 3.11.
-  Either one refuses mail.
+- **`default_action=accept` is what keeps the deployment fail-open.** The
+  milter itself never rejects. Without that setting, a stopped or timed-out
+  milter gets the global `milter_default_action`: `tempfail`, or `shutdown`
+  since Postfix 3.11, and either one refuses mail. Set inside the braces, it
+  covers this milter only. Don't set the global `milter_default_action =
+  accept` instead: it would also let mail through unscanned whenever a virus
+  or spam milter is down.
+- **Check that port 10025 is free.** Content-filter setups, amavis among
+  them, often have Postfix listen on 127.0.0.1:10025 to take filtered mail
+  back. `postconf -M | grep 10025` shows whether Postfix has a service there,
+  and `ss -ltn` (or `lsof -iTCP -sTCP:LISTEN`) shows anything else. If it's
+  taken, run `sworn-milter --listen tcp:127.0.0.1:<free port>` and use the
+  same port in `smtpd_milters`.
+- **If `smtpd_milters` is already set, edit that line** rather than adding a
+  second one, which would replace it. Put this entry first:
+  `smtpd_milters = { inet:127.0.0.1:10025, default_action=accept }, <your existing milters>`.
+  OpenDKIM or OpenDMARC may use the same authserv-id; running ahead of them,
+  sworn-milter never sees their results, so it can't remove them.
+- **TCP on loopback works the same everywhere.** A `unix:` socket works too,
+  but a chrooted smtpd reads an absolute socket path inside the queue
+  directory, so `unix:/var/spool/postfix/sworn.sock` would point at the wrong
+  place, and with `default_action=accept` Postfix would just log a warning and
+  skip the milter.
 - **Run it on the border MTA**, the one that accepts connections from the
   Internet. It evaluates the connecting address and deletes inbound
   `Authentication-Results` fields that claim its authserv-id, so it must sit
   where mail enters your ADMD. Behind a load balancer or proxy, Postfix must
   see the real client address (for example `smtpd_upstream_proxy_protocol =
   haproxy`); otherwise every connection is evaluated as the balancer's address.
+  Only do that on a listener nothing but the proxy can reach, or anyone can
+  claim an attested address.
 - **`--authserv-id`** defaults to the hostname. Set it to the authserv-id your
   downstream filters trust; inbound results claiming that id are removed. The
   match is deliberately loose (case, a trailing dot, odd whitespace,
   comments), and any field containing a MIME encoded-word is removed outright,
   so oddly spelled forgeries go too.
-- **List sworn-milter first in `smtpd_milters`** if other milters (OpenDKIM,
-  OpenDMARC) use the same authserv-id. That way their results can never be
-  mistaken for inbound ones and removed.
 - **Removing forged results fails open too.** While the milter is down, mail is
   accepted without our result *and* without inbound `Authentication-Results`
   fields claiming your id being removed. A downstream filter that trusts that
