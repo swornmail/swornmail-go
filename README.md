@@ -93,6 +93,7 @@ TOKEN=$(./bin/sworn sign --key 2026a.key --selector 2026a \
 
 ```
 go test ./...
+sh test/postfix/run.sh                 # the milter through a real Postfix (needs Docker)
 go run ./cmd/genvectors               # regenerate the deterministic vectors
 go run ./cmd/sworn keygen --selector 2026a
 go run ./cmd/sworn genrecord --domain example.com --selector 2026a --key 2026a.key --prefix <p>

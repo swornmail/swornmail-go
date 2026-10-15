@@ -1,0 +1,7 @@
+# Keeps the integration test's build context to the source it needs. .git can
+# hold a CI checkout token in its config, and `sworn keygen` writes signing
+# keys into the working directory.
+.git
+*.key
+.omc
+bin
