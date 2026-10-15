@@ -30,3 +30,17 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+  postfix:
+    # The milter in front of a real Postfix (Debian's, smtpd chrooted),
+    # configured the way swornmail.dev/milter documents, on an IPv6 network
+    # with planted records. Unit tests use go-milter's client, which can't
+    # show how Postfix itself drives a milter across several messages.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Postfix integration
+        run: sh test/postfix/run.sh
