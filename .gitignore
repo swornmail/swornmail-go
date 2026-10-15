@@ -1,6 +1,9 @@
+# Binaries from go build. /sworn also matches the sworn/ package directory,
+# so put that back, or new files under it get ignored and never committed.
 /difftest
 /recorddiff
 /sworn
+!/sworn/
 /sworn-milter
 /genvectors
 
