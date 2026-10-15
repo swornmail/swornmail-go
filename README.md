@@ -105,6 +105,37 @@ go run ./cmd/sworn discover --ip <addr>
 go run ./cmd/sworn-milter --listen unix:/var/spool/postfix/sworn.sock
 ```
 
+### Running the milter under Postfix
+
+```
+# main.cf
+smtpd_milters         = unix:/var/spool/postfix/sworn.sock
+milter_default_action = accept
+```
+
+- **`milter_default_action = accept` is what makes the deployment fail-open.**
+  The milter itself never rejects, but if it is stopped or times out, Postfix
+  applies its default action: `tempfail`, or `shutdown` since Postfix 3.11.
+  Either one refuses mail.
+- **Run it on the border MTA**, the one that accepts connections from the
+  Internet. It evaluates the connecting address and deletes inbound
+  `Authentication-Results` fields that claim its authserv-id, so it must sit
+  where mail enters your ADMD. Behind a load balancer or proxy, Postfix must
+  see the real client address (for example `smtpd_upstream_proxy_protocol =
+  haproxy`); otherwise every connection is evaluated as the balancer's address.
+- **`--authserv-id`** defaults to the hostname. Set it to the authserv-id your
+  downstream filters trust; inbound results claiming that id are removed. The
+  match is deliberately loose (case, a trailing dot, odd whitespace,
+  comments), and any field containing a MIME encoded-word is removed outright,
+  so oddly spelled forgeries go too.
+- **List sworn-milter first in `smtpd_milters`** if other milters (OpenDKIM,
+  OpenDMARC) use the same authserv-id. That way their results can never be
+  mistaken for inbound ones and removed.
+- **Removing forged results fails open too.** While the milter is down, mail is
+  accepted without our result *and* without inbound `Authentication-Results`
+  fields claiming your id being removed. A downstream filter that trusts that
+  id will see whatever the sender wrote until the milter is back.
+
 For library integrations, the safe live-DNS order is:
 
 ```go

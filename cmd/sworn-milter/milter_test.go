@@ -89,15 +89,95 @@ func TestEvaluateIPv4SourceIsNone(t *testing.T) {
 	}
 }
 
+// authservIDOf is the strict RFC 8601 reading of the id.
 func TestAuthservIDOf(t *testing.T) {
 	cases := map[string]string{
 		"mx.example; spf=pass": "mx.example",
 		"  mx.example ; x=y":   "mx.example",
 		"mx.example":           "mx.example",
+		"mx.example; none":     "mx.example",
+		// These all got past the old cut-at-';' parsing.
+		"mx.example 1; sworn=pass":           "mx.example", // authres-version
+		"mx.example (ok); sworn=pass":        "mx.example", // comment after the id
+		"(c) mx.example; sworn=pass":         "mx.example", // leading comment
+		"((a) b) mx.example; sworn=pass":     "mx.example", // nested comment
+		`(a\) b) mx.example; sworn=pass`:     "mx.example", // quoted-pair in a comment
+		`"mx.example"; sworn=pass`:           "mx.example", // quoted-string id
+		`"mx.\example" 1; sworn=pass`:        "mx.example", // quoted-pair in the id
+		"\r\n\tmx.example\r\n\t; sworn=pass": "mx.example", // folded
+		// Someone else's id is not ours, even if it mentions ours.
+		"mx.example.net; spf=pass":        "mx.example.net",
+		"other.example (mx.example); x=y": "other.example",
+		`"mx.example x"; sworn=pass`:      "mx.example x",
+		"(mx.example; sworn=pass":         "", // unterminated comment: no id
 	}
 	for in, want := range cases {
 		if got := authservIDOf(in); got != want {
 			t.Errorf("authservIDOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The sender picks every byte of an inbound AR field, and parsers downstream
+// don't agree on whitespace, comments, escapes or where the id ends. If any
+// of them would read the field as ours, it has to go; deleting one we didn't
+// need to is harmless.
+func TestForgedResultsAreStripped(t *testing.T) {
+	forged := []string{
+		"mx.example; sworn=pass",
+		"MX.Example; sworn=pass",
+		"mx.example.; sworn=pass",
+		"mx.example 1; sworn=pass",
+		"(c) mx.example; sworn=pass",
+		`"mx.example"; sworn=pass`,
+		`"mx.\example"; sworn=pass`,
+		// Whitespace that strings.TrimSpace knows about but RFC 5322 doesn't.
+		"mx.example\v; sworn=pass",
+		"mx.example\f; sworn=pass",
+		"\vmx.example; sworn=pass",
+		"mx.example ; sworn=pass",
+		"mx.example\u0085; sworn=pass",
+		"mx.example ; sworn=pass",
+		// A token ends at the first tspecial.
+		"mx.example/1; sworn=pass",
+		// Comments read without escapes, without nesting, or not at all.
+		`(a\) mx.example; sworn=pass`,
+		"((a) mx.example; sworn=pass",
+		"(mx.example; sworn=pass",
+		// Encoded-words aren't allowed here, but some parsers decode them.
+		"=?utf-8?q?mx.example?=; sworn=pass",
+		"=?utf-8?q?mx.example=3B_sworn=3Dpass?=",
+		"=?utf-8?b?bXguZXhhbXBsZTsgc3dvcm49cGFzcw==?=",
+		"=?koi8-r?q?mx.example?=; sworn=pass",
+		"=?utf-8?b?!!!?= =?utf-8?q?mx.example?=; sworn=pass", // bad word first
+		// Python decodes these too, though Go's mime package won't.
+		"=?utf-8?b?bXguZXhhbXBsZTsgc3dvcm49cGFzcw?=",
+		"=?utf-8?b?bXguZXhhbXBsZQ?=; sworn=pass",
+		"=?utf-8?b?bXgu!ZXhhbXBsZQ==?=; sworn=pass",
+		"=?utf-8?b?bXguZXhhbXBsZQ===?=; sworn=pass",
+		"=?utf-8?q?mx.example; sworn=pass?=",
+		"=?utf-8?b?bXguZXhh bXBsZQ==?=; sworn=pass",
+		"=?utf-8?q?mx.example=ZZ?=; sworn=pass",
+	}
+	for _, v := range forged {
+		m := &swornMilter{authservID: "mx.example"}
+		m.Header("Authentication-Results", v, nil)
+		if len(m.stripIdx) != 1 {
+			t.Errorf("forged %q was not stripped", v)
+		}
+	}
+
+	others := []string{
+		"other.example; spf=pass",
+		"mx.example.net; spf=pass",
+		"sub.mx.example; spf=pass",
+		"other.example (mx.example); dkim=pass",
+	}
+	for _, v := range others {
+		m := &swornMilter{authservID: "mx.example"}
+		m.Header("Authentication-Results", v, nil)
+		if len(m.stripIdx) != 0 {
+			t.Errorf("someone else's %q was stripped", v)
 		}
 	}
 }

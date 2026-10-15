@@ -44,17 +44,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := &milter.Server{
-		NewMilter: func() milter.Milter {
-			return &swornMilter{
-				authservID: *authservID,
-				resolver:   net.DefaultResolver,
-				dnsTimeout: *dnsTimeout,
-			}
-		},
-		Actions:  milter.OptAddHeader | milter.OptChangeHeader,
-		Protocol: milter.OptNoBody, // skip body chunks; we act on headers + end of message
-	}
+	server := newServer(*authservID, net.DefaultResolver, *dnsTimeout)
 
 	go func() {
 		sig := make(chan os.Signal, 1)
