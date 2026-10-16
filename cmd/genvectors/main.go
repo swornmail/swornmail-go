@@ -270,6 +270,16 @@ func paddedToken(n int) []byte {
 	panic(fmt.Sprintf("no padding gives a %d-octet token", n))
 }
 
+// bigEndian is the minimal big-endian byte string of n, the content of a
+// CBOR bignum (tag 2).
+func bigEndian(n uint64) []byte {
+	var b []byte
+	for ; n > 0; n >>= 8 {
+		b = append([]byte{byte(n)}, b...)
+	}
+	return b
+}
+
 func goodProt() cose.ProtectedHeader {
 	return cose.ProtectedHeader{
 		cose.HeaderLabelContentType: sworn.ContentType,
@@ -610,6 +620,39 @@ func main() {
 			operator: "mailer.example.com", unit: "2001:db8:f00:1234::/64"},
 		{name: "token_over_size_cap", section: "token", token: paddedToken(sworn.MaxTokenSize + 1),
 			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+
+		// --- payload value types (appended) ---
+		//
+		// §token CDDL: operator is tstr and iat/exp are uint. A tagged value
+		// is not a tstr or uint, and a bignum is CDDL's biguint, a different
+		// type. Only key 99, typed `any`, may carry a tag.
+		{name: "operator_tagged", section: "token",
+			token: signRaw(kv{1, cbor.Tag{Number: 32, Content: "mailer.example.com"}}, kv{2, prefixWire("2001:db8:f00::", 48)},
+				kv{3, uint64(64)}, kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, "mta"}),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "iat_tagged_epoch", section: "token",
+			token: signRaw(kv{1, "mailer.example.com"}, kv{2, prefixWire("2001:db8:f00::", 48)},
+				kv{3, uint64(64)}, kv{4, cbor.Tag{Number: 1, Content: uint64(t0)}}, kv{5, uint64(expU)}, kv{6, "mta"}),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "iat_bignum", section: "token",
+			token: signRaw(kv{1, "mailer.example.com"}, kv{2, prefixWire("2001:db8:f00::", 48)},
+				kv{3, uint64(64)}, kv{4, cbor.Tag{Number: 2, Content: bigEndian(uint64(t0))}}, kv{5, uint64(expU)}, kv{6, "mta"}),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "unknown_key_tagged_ignored", section: "token",
+			token:  signRaw(append(goodEntries(), kv{99, cbor.Tag{Number: 2, Content: []byte{1}}})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "pass",
+			operator: "mailer.example.com", unit: "2001:db8:f00:1234::/64"},
+		// uint runs to 2^64-1. A time past 2^63 is far in the future, so the
+		// token is not yet valid; an implementation that stores seconds in a
+		// signed 64-bit integer must not turn that into a malformed token.
+		{name: "iat_beyond_int64", section: "token",
+			token: signRaw(kv{1, "mailer.example.com"}, kv{2, prefixWire("2001:db8:f00::", 48)},
+				kv{3, uint64(64)}, kv{4, uint64(1<<63 + 100)}, kv{5, uint64(1<<63 + 3700)}, kv{6, "mta"}),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "not_yet_valid"},
+		{name: "validity_straddles_int64", section: "token",
+			token: signRaw(kv{1, "mailer.example.com"}, kv{2, prefixWire("2001:db8:f00::", 48)},
+				kv{3, uint64(64)}, kv{4, uint64(1<<63 - 1800)}, kv{5, uint64(1<<63 + 1800)}, kv{6, "mta"}),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "not_yet_valid"},
 	}
 
 	// Self-check against the reference implementation; authored expectations
