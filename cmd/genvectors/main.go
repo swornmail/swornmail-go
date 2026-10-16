@@ -243,6 +243,17 @@ func (identityRSigner) Sign(_ io.Reader, content []byte) ([]byte, error) {
 	return append(r, edwards25519.NewScalar().Multiply(k, a).Bytes()...), nil
 }
 
+// strayBits sets a stray bit in the last character of a base64 string with
+// one "=" of padding: the decoded bytes are the same, the spelling is not
+// canonical.
+func strayBits(b64 string) string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	out := []byte(b64)
+	last := len(out) - 2
+	out[last] = alphabet[strings.IndexByte(alphabet, out[last])^1]
+	return string(out)
+}
+
 func goodProt() cose.ProtectedHeader {
 	return cose.ProtectedHeader{
 		cose.HeaderLabelContentType: sworn.ContentType,
@@ -794,6 +805,10 @@ func main() {
 		{"policy_dotted_quad_before_gap", "v=SWORN1; p=32.1.13.184::/32", "policy", "error"},
 		{"policy_uppercase_hex_prefix", "v=SWORN1; p=2001:DB8:F00::/48", "policy", "ok"},
 		{"policy_uncompressed_prefix", "v=SWORN1; p=2001:db8:f00:0:0:0:0:0/48", "policy", "ok"},
+		// Appended: the file's own key, spelled with a stray bit in the last
+		// base64 character. RFC 4648 3.5 leaves those bits zero; Go's lenient
+		// decoder dropped them and accepted the record, Rust rejected it.
+		{"key_pk_noncanonical_base64", "v=SWORN1; k=ed25519; pk=" + strayBits(base64.StdEncoding.EncodeToString(pub)), "key", "error"},
 	}
 	for _, r := range records {
 		var perr error

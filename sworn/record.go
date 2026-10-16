@@ -173,7 +173,10 @@ func ParseRecord(txt string) (Record, error) {
 			}
 			rec.Algorithm = v
 		case "pk":
-			raw, err := base64.StdEncoding.DecodeString(v)
+			// Strict: the unused bits of the last character must be zero
+			// (RFC 4648 3.5). The lenient decoder drops them, so one key had
+			// many spellings that Go accepted and Rust rejected.
+			raw, err := base64.StdEncoding.Strict().DecodeString(v)
 			if err != nil || len(raw) != ed25519.PublicKeySize {
 				return Record{}, ErrRecordKey
 			}
