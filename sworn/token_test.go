@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -659,6 +660,18 @@ func TestPolicyRecordAllowsLeadingSemicolon(t *testing.T) {
 	}
 }
 
+// strayBitsPK re-spells pk with a stray bit in the final character. RFC 4648
+// leaves those bits zero in the canonical encoding; a lenient decoder drops
+// them and yields the same 32 bytes, a strict one rejects the string.
+func strayBitsPK(t *testing.T) string {
+	t.Helper()
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	pk := []byte(base64.StdEncoding.EncodeToString(testPub))
+	last := len(pk) - 2 // the character before the single "=" pad
+	pk[last] = alphabet[strings.IndexByte(alphabet, pk[last])^1]
+	return string(pk)
+}
+
 func TestRecordRejects(t *testing.T) {
 	pk := base64.StdEncoding.EncodeToString(testPub)
 	bad := map[string]string{
@@ -671,6 +684,9 @@ func TestRecordRejects(t *testing.T) {
 		// (permerror); Go used to accept it and fail at verify (fail), so the
 		// same record gave two different results.
 		"key not a curve point": "v=SWORN1; k=ed25519; pk=AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		// Same key, non-canonical spelling. Rust rejects it; Go used to
+		// accept it, so one record parsed in one verifier and not the other.
+		"pk with stray bits in the last character": "v=SWORN1; k=ed25519; pk=" + strayBitsPK(t),
 	}
 	for name, txt := range bad {
 		if _, err := ParseRecord(txt); err == nil {
