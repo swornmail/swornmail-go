@@ -772,6 +772,16 @@ func main() {
 		{"policy_trailing_comma", "v=SWORN1; p=2001:db8:f00::/48,", "policy", "ok"},
 		{"policy_leading_comma", "v=SWORN1; p=,2001:db8:f00::/48", "policy", "ok"},
 		{"policy_double_comma", "v=SWORN1; p=2001:db8:f00::/48,,2001:db8:f01::/48", "policy", "ok"},
+		// Appended: a pk of the right length that is not a curve point (y = 2)
+		// makes the record malformed. Go used to accept it and fail every
+		// signature, while Rust rejected the record.
+		{"key_not_a_curve_point", "v=SWORN1; k=ed25519; pk=AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "key", "error"},
+		// Both implementations accept the two non-canonical encodings RFC 8032
+		// 5.1.3 rejects, and the draft says so. Pinned, so an implementation
+		// that rejects them shows up as a divergence rather than in the field:
+		// y = p + 3 (an ordinary point), and x = 0 with the sign bit set.
+		{"key_noncanonical_y_accepted", "v=SWORN1; k=ed25519; pk=8P///////////////////////////////////////38=", "key", "ok"},
+		{"key_x0_sign_bit_accepted", "v=SWORN1; k=ed25519; pk=AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA=", "key", "ok"},
 	}
 	for _, r := range records {
 		var perr error
