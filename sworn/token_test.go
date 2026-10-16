@@ -627,6 +627,19 @@ func TestPolicyRecordRejects(t *testing.T) {
 		"rua CRLF injection":         "v=SWORN1; rua=mailto:a@b.example\r\nBcc:victim@example.net",
 		"rua recipient list":         "v=SWORN1; rua=mailto:a@b.example,c@d.example",
 		"unit broader than prefix":   "v=SWORN1; p=2001:db8:f00:1200::/56; u=48",
+		// The ABNF allows digits only, with no sign and no leading zero. A
+		// spelling one parser trims and another rejects is a divergence, so
+		// none of these may parse anywhere.
+		"unit with a plus sign":           "v=SWORN1; p=2001:db8:f00::/48; u=+64",
+		"unit with a leading zero":        "v=SWORN1; p=2001:db8:f00::/48; u=064",
+		"unit with leading zeros":         "v=SWORN1; p=2001:db8:f00::/48; u=0064",
+		"prefix length with leading zero": "v=SWORN1; p=2001:db8:f00::/048",
+		"prefix length with a plus sign":  "v=SWORN1; p=2001:db8:f00::/+48",
+		// A tag needs a name. The Rust verifier always rejected this; Go and
+		// Lua ignored it as an unknown tag.
+		"empty tag name": "v=SWORN1; p=2001:db8:f00::/48; =x",
+		// An embedded IPv4 address may only end an IPv6 address.
+		"dotted quad before the gap": "v=SWORN1; p=32.1.13.184::/32",
 	}
 	for name, txt := range bad {
 		if _, err := ParsePolicyRecord(txt); err == nil {

@@ -782,6 +782,18 @@ func main() {
 		// y = p + 3 (an ordinary point), and x = 0 with the sign bit set.
 		{"key_noncanonical_y_accepted", "v=SWORN1; k=ed25519; pk=8P///////////////////////////////////////38=", "key", "ok"},
 		{"key_x0_sign_bit_accepted", "v=SWORN1; k=ed25519; pk=AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA=", "key", "ok"},
+		// Appended with the record ABNF: numbers are digits only, with no
+		// sign and no leading zero; a tag has a name; an embedded IPv4
+		// address only ends an IPv6 address. Each of these split the three
+		// parsers before. The last two pin spellings that stay valid.
+		{"policy_unit_plus_sign", "v=SWORN1; p=2001:db8:f00::/48; u=+64", "policy", "error"},
+		{"policy_unit_leading_zero", "v=SWORN1; p=2001:db8:f00::/48; u=064", "policy", "error"},
+		{"policy_prefix_len_leading_zero", "v=SWORN1; p=2001:db8:f00::/048", "policy", "error"},
+		{"policy_prefix_len_plus_sign", "v=SWORN1; p=2001:db8:f00::/+48", "policy", "error"},
+		{"policy_empty_tag_name", "v=SWORN1; p=2001:db8:f00::/48; =x", "policy", "error"},
+		{"policy_dotted_quad_before_gap", "v=SWORN1; p=32.1.13.184::/32", "policy", "error"},
+		{"policy_uppercase_hex_prefix", "v=SWORN1; p=2001:DB8:F00::/48", "policy", "ok"},
+		{"policy_uncompressed_prefix", "v=SWORN1; p=2001:db8:f00:0:0:0:0:0/48", "policy", "ok"},
 	}
 	for _, r := range records {
 		var perr error
