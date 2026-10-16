@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"time"
@@ -178,6 +179,38 @@ func signWith(payload []byte, prot cose.ProtectedHeader, unprot cose.Unprotected
 	return b
 }
 
+// algEd25519 is the fully-specified COSE identifier for Ed25519, taken from
+// RFC 9864 §2.2 and the IANA COSE Algorithms registry, not from the library.
+const algEd25519 cose.Algorithm = -19
+
+// labelledSigner produces a plain RFC 8032 Ed25519 signature under whatever
+// COSE alg label a case names. go-cose's own signer refuses a header alg that
+// differs from its -8, and these cases need -19 or a deliberately wrong label
+// over a signature that is itself valid.
+type labelledSigner struct{ alg cose.Algorithm }
+
+func (s labelledSigner) Algorithm() cose.Algorithm { return s.alg }
+
+func (labelledSigner) Sign(_ io.Reader, content []byte) ([]byte, error) {
+	return ed25519.Sign(priv, content), nil
+}
+
+// signWithAlg signs the valid payload and protected header under alg.
+func signWithAlg(alg cose.Algorithm) []byte {
+	msg := cose.NewSign1Message()
+	msg.Payload = buildMap(goodEntries()...)
+	msg.Headers.Protected = goodProt()
+	msg.Headers.Protected[cose.HeaderLabelAlgorithm] = alg
+	if err := msg.Sign(nil, nil, labelledSigner{alg}); err != nil {
+		panic(err)
+	}
+	b, err := msg.MarshalCBOR()
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 func goodProt() cose.ProtectedHeader {
 	return cose.ProtectedHeader{
 		cose.HeaderLabelContentType: sworn.ContentType,
@@ -232,6 +265,9 @@ func main() {
 
 	tampered := append([]byte(nil), good...)
 	tampered[len(tampered)-1] ^= 0xff
+	fullySpecified := signWithAlg(algEd25519)
+	fullySpecifiedTampered := append([]byte(nil), fullySpecified...)
+	fullySpecifiedTampered[len(fullySpecifiedTampered)-1] ^= 0xff
 	untagged := good
 	if len(good) > 0 && good[0] == 0xd2 {
 		untagged = good[1:]
@@ -423,6 +459,24 @@ func main() {
 				kv{2, prefixWire("2001:db8:f01::", 48)},
 				kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, "mta"}),
 			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+
+		// --- COSE algorithm identifier (appended; earlier cases unchanged) ---
+		//
+		// §token: the verifier takes the algorithm from k= and rejects a token
+		// whose alg "does not correspond to it". RFC 9864 deprecated the
+		// polymorphic EdDSA (-8) for the fully-specified Ed25519 (-19); both
+		// correspond to k=ed25519, so both verify.
+		{name: "alg_ed25519_fully_specified", section: "token", token: fullySpecified,
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "pass",
+			operator: "mailer.example.com", unit: "2001:db8:f00:1234::/64"},
+		// A verifier that accepted the -19 label without checking the
+		// signature would pass forgeries carrying it.
+		{name: "alg_ed25519_fully_specified_tampered", section: "token", token: fullySpecifiedTampered,
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "bad_signature"},
+		// Algorithm substitution: the token may not choose its algorithm, so a
+		// valid Ed25519 signature labelled ES256 is a header fault.
+		{name: "alg_es256_substituted", section: "token", token: signWithAlg(cose.AlgorithmES256),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "header_confusion"},
 	}
 
 	// Self-check against the reference implementation; authored expectations

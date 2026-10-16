@@ -4,11 +4,13 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	cose "github.com/veraison/go-cose"
 )
 
 // Deterministic key for reproducible tests and vectors.
@@ -131,6 +133,86 @@ func TestTamperedToken(t *testing.T) {
 	tok[len(tok)-1] ^= 0xff
 	if _, err := VerifySignatureOnly(tok, testPub, inside, now); err == nil {
 		t.Error("tampered token verified")
+	}
+}
+
+// labelledSigner produces a plain Ed25519 signature under whatever COSE alg
+// label a test names, so a token can carry -19 or a deliberately wrong
+// identifier over a signature that is itself valid.
+type labelledSigner struct{ alg cose.Algorithm }
+
+func (s labelledSigner) Algorithm() cose.Algorithm { return s.alg }
+
+func (labelledSigner) Sign(_ io.Reader, content []byte) ([]byte, error) {
+	return ed25519.Sign(testPriv, content), nil
+}
+
+func signWithAlg(t *testing.T, alg cose.Algorithm) []byte {
+	t.Helper()
+	payload, err := encodePayload(basePayload())
+	if err != nil {
+		t.Fatalf("encodePayload: %v", err)
+	}
+	msg := cose.NewSign1Message()
+	msg.Payload = payload
+	msg.Headers.Protected[cose.HeaderLabelAlgorithm] = alg
+	msg.Headers.Protected[cose.HeaderLabelKeyID] = []byte(testSelector)
+	msg.Headers.Protected[cose.HeaderLabelContentType] = ContentType
+	if err := msg.Sign(nil, nil, labelledSigner{alg}); err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	tok, err := msg.MarshalCBOR()
+	if err != nil {
+		t.Fatalf("MarshalCBOR: %v", err)
+	}
+	return tok
+}
+
+// RFC 9864 deprecated the polymorphic EdDSA identifier (-8) in favour of the
+// fully-specified Ed25519 (-19). Both name the algorithm k=ed25519 fixes, so
+// both verify. Any other identifier is algorithm substitution and fails before
+// the key is used, even over a valid Ed25519 signature.
+func TestTokenAlgorithmIdentifier(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		alg    cose.Algorithm
+		tamper bool
+		want   error
+	}{
+		{"polymorphic EdDSA", cose.AlgorithmEdDSA, false, nil},
+		{"fully-specified Ed25519", algEd25519, false, nil},
+		// A verifier that waved -19 through without checking the signature
+		// would pass forgeries carrying the new label.
+		{"fully-specified Ed25519, tampered", algEd25519, true, ErrBadSignature},
+		{"substituted ES256", cose.AlgorithmES256, false, ErrHeaderConfusion},
+		// Ed448 is EdDSA too, but not the algorithm k=ed25519 names.
+		{"fully-specified Ed448", cose.Algorithm(-53), false, ErrHeaderConfusion},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tok := signWithAlg(t, tc.alg)
+			if tc.tamper {
+				tok[len(tok)-1] ^= 0xff
+			}
+			res, err := VerifySignatureOnly(tok, testPub, inside, now)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if tc.want == nil && res.Operator != "mailer.example.com" {
+				t.Errorf("operator = %q", res.Operator)
+			}
+		})
+	}
+}
+
+// Signers stay on -8 until released verifiers accept -19; switching early
+// would turn every older verifier's pass into a permerror.
+func TestSignEmitsPolymorphicEdDSA(t *testing.T) {
+	var msg cose.Sign1Message
+	if err := msg.UnmarshalCBOR(mustSign(t, basePayload())); err != nil {
+		t.Fatal(err)
+	}
+	if alg, err := msg.Headers.Protected.Algorithm(); err != nil || alg != cose.AlgorithmEdDSA {
+		t.Errorf("alg = %v (%v), want EdDSA (-8)", alg, err)
 	}
 }
 
