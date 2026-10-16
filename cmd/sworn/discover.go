@@ -15,6 +15,8 @@ func cmdDiscover(args []string) int {
 	fs := flag.NewFlagSet("discover", flag.ContinueOnError)
 	ip := fs.String("ip", "", "connecting source IPv6 address (required)")
 	asJSON := fs.Bool("json", false, "JSON output")
+	var ineligible prefixFlag
+	fs.Var(&ineligible, "ineligible-prefix", "extra IPv6 prefixes to treat as ineligible sources (comma-separated or repeated)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -30,7 +32,7 @@ func cmdDiscover(args []string) int {
 
 	ctx, cancel := dnsContext()
 	defer cancel()
-	res, derr := discover.Discover(ctx, defaultResolver, src, discover.Options{})
+	res, derr := discover.Discover(ctx, defaultResolver, src, discover.Options{IneligiblePrefixes: ineligible})
 
 	var out discoverOutput
 	switch {

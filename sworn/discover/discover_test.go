@@ -250,6 +250,31 @@ func TestIneligibleSourceIsNone(t *testing.T) {
 	}
 }
 
+// Every protocol-ineligible source, and one in a configured prefix, ends as
+// none before any query: no attested prefix can contain it, so asking DNS
+// only spends the budget and loads the resolver.
+func TestIneligibleSourcesMakeNoQueries(t *testing.T) {
+	configured := Options{IneligiblePrefixes: []netip.Prefix{netip.MustParsePrefix("2001:db8:f00:1234::/64")}}
+	for name, tc := range map[string]struct {
+		addr string
+		opt  Options
+	}{
+		"ula":               {"fd00::1", Options{}},
+		"link-local":        {"fe80::1", Options{}},
+		"teredo":            {"2001::1", Options{}},
+		"nat64 well-known":  {"64:ff9b::203.0.113.5", Options{}},
+		"configured prefix": {src.String(), configured},
+	} {
+		f := &fakeResolver{}
+		if _, err := Discover(context.Background(), f, netip.MustParseAddr(tc.addr), tc.opt); !errors.Is(err, ErrNone) {
+			t.Errorf("%s: err = %v, want ErrNone", name, err)
+		}
+		if f.calls != 0 {
+			t.Errorf("%s: made %d queries, want 0", name, f.calls)
+		}
+	}
+}
+
 func TestQueryBudgetNotExceeded(t *testing.T) {
 	// Worst case: both reverse-tree misses, PTR hit, forward confirm, full
 	// 5-candidate walk with no confirmation. Must stay within MaxQueries.

@@ -586,6 +586,13 @@ func (a AuthorizedVerification) VerifySignature(pub ed25519.PublicKey) (Result, 
 // membership, unit rules, and the validity window. A failure here must be
 // returned without issuing either the policy or key query.
 func PrepareVerification(token []byte, source netip.Addr, now time.Time) (*PreparedVerification, error) {
+	return PrepareVerificationWith(token, source, now, VerifyOptions{})
+}
+
+// PrepareVerificationWith is PrepareVerification with a receiver's local
+// settings applied; a source inside a configured ineligible prefix is
+// rejected as ineligible.
+func PrepareVerificationWith(token []byte, source netip.Addr, now time.Time, opts VerifyOptions) (*PreparedVerification, error) {
 	var msg cose.Sign1Message
 	if err := msg.UnmarshalCBOR(token); err != nil {
 		return nil, ErrMalformed
@@ -610,7 +617,7 @@ func PrepareVerification(token []byte, source netip.Addr, now time.Time) (*Prepa
 	if p.Role == "esp-tenant" && int(p.Unit) != p.Prefix.Bits() {
 		return nil, ErrBadUnit
 	}
-	if !eligibleSource(source) {
+	if !opts.Eligible(source) {
 		return nil, ErrIneligibleSrc
 	}
 	if !p.Prefix.Contains(source) {

@@ -139,3 +139,17 @@ func leadingPositional(args []string) (string, []string) {
 	}
 	return "", args
 }
+
+// prefixFlag collects --ineligible-prefix values for verify and discover.
+type prefixFlag []netip.Prefix
+
+func (p *prefixFlag) String() string { return fmt.Sprint([]netip.Prefix(*p)) }
+
+func (p *prefixFlag) Set(v string) error {
+	ps, err := sworn.ParseIneligiblePrefixes(v)
+	if err != nil {
+		return err
+	}
+	*p = append(*p, ps...)
+	return nil
+}
