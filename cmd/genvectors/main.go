@@ -254,6 +254,22 @@ func strayBits(b64 string) string {
 	return string(out)
 }
 
+// paddedToken signs the valid payload plus an unknown key 99 whose byte
+// string is sized so the whole token is exactly n octets. Verifiers ignore
+// the unknown key, so length is the only thing that differs.
+func paddedToken(n int) []byte {
+	for pad := 0; pad < n; pad++ {
+		tok := signRaw(append(goodEntries(), kv{99, make([]byte, pad)})...)
+		if len(tok) == n {
+			return tok
+		}
+		if len(tok) > n {
+			break
+		}
+	}
+	panic(fmt.Sprintf("no padding gives a %d-octet token", n))
+}
+
 func goodProt() cose.ProtectedHeader {
 	return cose.ProtectedHeader{
 		cose.HeaderLabelContentType: sworn.ContentType,
@@ -584,6 +600,16 @@ func main() {
 			expect: "bad_signature"},
 		{name: "small_order_r_component", section: "token", token: smallOrderR,
 			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "bad_signature"},
+
+		// --- token size bound (appended) ---
+		//
+		// §token: a token longer than 3072 octets is malformed before it is
+		// decoded. Both tokens are validly signed; only the length differs.
+		{name: "token_at_size_cap", section: "token", token: paddedToken(sworn.MaxTokenSize),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "pass",
+			operator: "mailer.example.com", unit: "2001:db8:f00:1234::/64"},
+		{name: "token_over_size_cap", section: "token", token: paddedToken(sworn.MaxTokenSize + 1),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
 	}
 
 	// Self-check against the reference implementation; authored expectations

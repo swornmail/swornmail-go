@@ -184,6 +184,25 @@ func generate(fuzzN int) []caseT {
 	add("alg_ed448_fully_specified", byAlg(cose.Algorithm(-53)), insideSrc, t0+1800)
 	add("alg_reserved_zero", byAlg(cose.Algorithm(0)), insideSrc, t0+1800)
 
+	// --- size bound: exactly at the cap, one over, and far over ---
+	for _, n := range []int{sworn.MaxTokenSize, sworn.MaxTokenSize + 1, 4096} {
+		found := false
+		for pad := 0; pad < n && !found; pad++ {
+			tok := signRaw(append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, make([]byte, pad)})...)
+			if len(tok) > n {
+				break
+			}
+			if len(tok) == n {
+				add(fmt.Sprintf("size_%d", n), tok, insideSrc, t0+1800)
+				found = true
+			}
+		}
+		// A missing size case would silently drop the edge this block exists to test.
+		if !found {
+			panic(fmt.Sprintf("no padding gives a %d-octet token", n))
+		}
+	}
+
 	// --- unvectored judgment calls (Rust report flagged these) ---
 	add("operator_trailing_dot", signRaw(kv{1, "mailer.example.com."}, kv{2, prefixWire("2001:db8:f00::", 48)},
 		kv{3, uint64(64)}, kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, "mta"}), insideSrc, t0+1800)
