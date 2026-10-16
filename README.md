@@ -213,6 +213,12 @@ record are now malformed. Token bytes are unchanged and every pre-existing
 vector still passes byte-identically. `sworn genrecord` never emitted any of
 those shapes; an operator who hand-wrote one must fix the record.
 
+A token longer than `sworn.MaxTokenSize` (3072 octets) is malformed and is
+rejected before any CBOR decoding. The longest SWORN command line carries at
+most 3066 octets of token, so nothing a client can send over SMTP is
+affected; the bound protects library callers that take tokens from
+elsewhere.
+
 ## Security
 
 See `SECURITY.md`. Report privately to security@swornmail.dev.

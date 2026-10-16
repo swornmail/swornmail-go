@@ -32,7 +32,12 @@ const (
 	MinPrefixLen     = 32 // -01: attested prefix length floor
 	MaxPrefixLen     = 64 // -01: attested prefix length ceiling
 	MaxTokenLifetime = 24 * time.Hour
-	SkewTolerance    = 300 * time.Second // -01: fixed clock-skew tolerance
+	// MaxTokenSize is the longest token, in octets, a verifier decodes. The
+	// longest SWORN command line (4096 octets) carries at most 3066; the
+	// bound is checked before any CBOR work, so an oversized input costs
+	// nothing to refuse.
+	MaxTokenSize  = 3072
+	SkewTolerance = 300 * time.Second // -01: fixed clock-skew tolerance
 	// ContentType is the COSE protected content-type header value that
 	// domain-separates SwornMail tokens from any other COSE use of a key.
 	ContentType = "application/sworn-token+cbor"
@@ -593,6 +598,10 @@ func PrepareVerification(token []byte, source netip.Addr, now time.Time) (*Prepa
 // settings applied; a source inside a configured ineligible prefix is
 // rejected as ineligible.
 func PrepareVerificationWith(token []byte, source netip.Addr, now time.Time, opts VerifyOptions) (*PreparedVerification, error) {
+	// The token is untrusted input; bound it before any CBOR decoding.
+	if len(token) > MaxTokenSize {
+		return nil, ErrMalformed
+	}
 	var msg cose.Sign1Message
 	if err := msg.UnmarshalCBOR(token); err != nil {
 		return nil, ErrMalformed
@@ -649,6 +658,11 @@ func PrepareVerificationWith(token []byte, source netip.Addr, now time.Time, opt
 // is not sufficient to decide whether DNS may be queried: complete verifiers
 // must use PrepareVerification so time, unit, and source checks run first.
 func ParseUnverified(token []byte) (selector, operator string, err error) {
+	// Same bound as PrepareVerificationWith: untrusted input, refused
+	// before any CBOR decoding.
+	if len(token) > MaxTokenSize {
+		return "", "", ErrMalformed
+	}
 	var msg cose.Sign1Message
 	if err = msg.UnmarshalCBOR(token); err != nil {
 		return "", "", ErrMalformed
