@@ -37,6 +37,27 @@ const (
 	ContentType = "application/sworn-token+cbor"
 )
 
+// algEd25519 is the fully-specified COSE identifier for Ed25519 (RFC 9864
+// §2.2). IANA deprecated the polymorphic EdDSA (-8) that tokens carry, so we
+// accept both under k=ed25519. Sign still emits -8, because verifiers built
+// before this change reject -19.
+const algEd25519 cose.Algorithm = -19
+
+// ed25519Alg reports whether alg names Ed25519, the only algorithm behind
+// k=ed25519. It never selects a verification algorithm: the key record
+// decides that, and the token's alg merely has to agree with it.
+func ed25519Alg(alg cose.Algorithm) bool {
+	return alg == cose.AlgorithmEdDSA || alg == algEd25519
+}
+
+// fullySpecifiedEd25519 is go-cose's EdDSA verifier presented under the RFC
+// 9864 identifier. go-cose v1.3.0 predates -19 and refuses a header whose
+// alg differs from its verifier's; the signature check underneath is the
+// same RFC 8032 verification either way.
+type fullySpecifiedEd25519 struct{ cose.Verifier }
+
+func (fullySpecifiedEd25519) Algorithm() cose.Algorithm { return algEd25519 }
+
 // CBOR map keys of the token payload, per I-D §Mode-2.
 const (
 	keyOperator = 1
@@ -382,7 +403,9 @@ func decodePayload(b []byte) (Payload, error) {
 // payload, with the selector in the protected kid header and the protocol
 // content-type binding (I-D -01 wire format). Ed25519 signing is
 // deterministic (RFC 8032), so tokens are reproducible for fixed inputs —
-// required for the published test vectors.
+// required for the published test vectors. It emits the polymorphic EdDSA
+// identifier (-8), not the fully-specified -19, because verifiers released
+// before -19 was accepted reject it.
 func Sign(p Payload, selector string, priv ed25519.PrivateKey) ([]byte, error) {
 	if !validSelector([]byte(selector)) {
 		return nil, ErrNoSelector
@@ -447,10 +470,10 @@ func protectedHeaders(msg *cose.Sign1Message) (string, error) {
 			return "", ErrHeaderConfusion
 		}
 	}
-	// The signed alg MUST be the one the protocol verifies (EdDSA for the sole
-	// registered k=ed25519); a differing alg is a header fault (permerror),
-	// not a signature failure.
-	if alg, ok := msg.Headers.Protected[cose.HeaderLabelAlgorithm]; !ok || alg != cose.AlgorithmEdDSA {
+	// The signed alg MUST name the algorithm the protocol verifies (Ed25519,
+	// for the sole registered k=ed25519), under either COSE identifier. A
+	// differing alg is a header fault (permerror), not a signature failure.
+	if alg, err := msg.Headers.Protected.Algorithm(); err != nil || !ed25519Alg(alg) {
 		return "", ErrHeaderConfusion
 	}
 	ct, ok := msg.Headers.Protected[cose.HeaderLabelContentType]
@@ -677,6 +700,10 @@ func verifyPrepared(prepared PreparedVerification, pub ed25519.PublicKey, testin
 	verifier, err := cose.NewVerifier(cose.AlgorithmEdDSA, pub)
 	if err != nil {
 		return Result{}, err
+	}
+	// protectedHeaders has already limited alg to the two Ed25519 identifiers.
+	if alg, _ := prepared.message.Headers.Protected.Algorithm(); alg == algEd25519 {
+		verifier = fullySpecifiedEd25519{verifier}
 	}
 	if err := prepared.message.Verify(nil, verifier); err != nil {
 		return Result{}, ErrBadSignature

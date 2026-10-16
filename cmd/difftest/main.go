@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -86,6 +87,31 @@ func signWith(payload []byte, prot cose.ProtectedHeader, unprot cose.Unprotected
 	}
 	if err := msg.Sign(nil, nil, signer); err != nil {
 		// nil rand => deterministic Ed25519 (RFC 8032).
+		panic(err)
+	}
+	b, _ := msg.MarshalCBOR()
+	return b
+}
+
+// algEd25519 is the fully-specified COSE identifier for Ed25519 (RFC 9864).
+const algEd25519 cose.Algorithm = -19
+
+// labelledSigner signs plain Ed25519 under any COSE alg label, which go-cose's
+// own -8 signer refuses to do.
+type labelledSigner struct{ alg cose.Algorithm }
+
+func (s labelledSigner) Algorithm() cose.Algorithm { return s.alg }
+
+func (labelledSigner) Sign(_ io.Reader, content []byte) ([]byte, error) {
+	return ed25519.Sign(priv, content), nil
+}
+
+func signWithAlg(alg cose.Algorithm, payload []byte) []byte {
+	msg := cose.NewSign1Message()
+	msg.Payload = payload
+	msg.Headers.Protected = goodProt()
+	msg.Headers.Protected[cose.HeaderLabelAlgorithm] = alg
+	if err := msg.Sign(nil, nil, labelledSigner{alg}); err != nil {
 		panic(err)
 	}
 	b, _ := msg.MarshalCBOR()

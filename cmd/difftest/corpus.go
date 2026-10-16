@@ -168,6 +168,22 @@ func generate(fuzzN int) []caseT {
 		addPolicy(ac.name, ac.token, ac.src, t0+1800, ac.policy)
 	}
 
+	// --- COSE alg identifier: both identifiers for Ed25519 pass, and the
+	// signature behind -19 is really checked; anything else is substitution.
+	byAlg := func(alg cose.Algorithm) []byte {
+		return signWithAlg(alg, buildMap(goodEntries("2001:db8:f00::", 48, 64, "mta")...))
+	}
+	fullySpecified := byAlg(algEd25519)
+	fullySpecifiedTampered := append([]byte(nil), fullySpecified...)
+	fullySpecifiedTampered[len(fullySpecifiedTampered)-1] ^= 0xff
+	add("alg_ed25519_fully_specified", fullySpecified, insideSrc, t0+1800)
+	addPolicy("alg_ed25519_fully_specified_authorized", fullySpecified, insideSrc, t0+1800,
+		"v=SWORN1; p=2001:db8:f00::/48; u=64")
+	add("alg_ed25519_fully_specified_tampered", fullySpecifiedTampered, insideSrc, t0+1800)
+	add("alg_es256_substituted", byAlg(cose.AlgorithmES256), insideSrc, t0+1800)
+	add("alg_ed448_fully_specified", byAlg(cose.Algorithm(-53)), insideSrc, t0+1800)
+	add("alg_reserved_zero", byAlg(cose.Algorithm(0)), insideSrc, t0+1800)
+
 	// --- unvectored judgment calls (Rust report flagged these) ---
 	add("operator_trailing_dot", signRaw(kv{1, "mailer.example.com."}, kv{2, prefixWire("2001:db8:f00::", 48)},
 		kv{3, uint64(64)}, kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, "mta"}), insideSrc, t0+1800)
