@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"filippo.io/edwards25519"
 	"github.com/fxamacker/cbor/v2"
 	cose "github.com/veraison/go-cose"
 )
@@ -696,6 +697,18 @@ func VerifyAuthorized(token []byte, pub ed25519.PublicKey, policy PolicyRecord, 
 	return Verify(token, pub, policy, source, now)
 }
 
+// smallOrder reports whether enc fails to decode as an Ed25519 point or
+// decodes to one of small order (in the 8-torsion). Non-canonical encodings
+// decode, so the order check catches them too; a byte blocklist would have to
+// list every spelling.
+func smallOrder(enc []byte) bool {
+	p, err := new(edwards25519.Point).SetBytes(enc)
+	if err != nil {
+		return true
+	}
+	return new(edwards25519.Point).MultByCofactor(p).Equal(edwards25519.NewIdentityPoint()) == 1
+}
+
 func verifyPrepared(prepared PreparedVerification, pub ed25519.PublicKey, testing bool, rua string) (Result, error) {
 	verifier, err := cose.NewVerifier(cose.AlgorithmEdDSA, pub)
 	if err != nil {
@@ -704,6 +717,16 @@ func verifyPrepared(prepared PreparedVerification, pub ed25519.PublicKey, testin
 	// protectedHeaders has already limited alg to the two Ed25519 identifiers.
 	if alg, _ := prepared.message.Headers.Protected.Algorithm(); alg == algEd25519 {
 		verifier = fullySpecifiedEd25519{verifier}
+	}
+	// Strict verification. The key comes from a DNS record and R from the
+	// token, so both are untrusted. crypto/ed25519 accepts a small-order key
+	// or R, and under a small-order key one fixed signature verifies for any
+	// message: a domain publishing such a key has in effect published its
+	// private key. This fails closed: anything undecodable or of small order
+	// is a signature failure, which is never worse than no attestation.
+	sig := prepared.message.Signature
+	if len(sig) != ed25519.SignatureSize || smallOrder(pub) || smallOrder(sig[:32]) {
+		return Result{}, ErrBadSignature
 	}
 	if err := prepared.message.Verify(nil, verifier); err != nil {
 		return Result{}, ErrBadSignature
