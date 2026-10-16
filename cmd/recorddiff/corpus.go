@@ -167,6 +167,8 @@ func generate() ([]policyCase, map[string]string) {
 		"no-slash":         "2001:db8:f00::",
 		"empty-length":     "2001:db8:f00::/",
 		"length-leading-0": "2001:db8:f00::/048",
+		"length-plus":      "2001:db8:f00::/+48",
+		"quad-before-gap":  "32.1.13.184::/32",
 		"not-an-address":   "nonsense/48",
 		"ipv4":             "192.0.2.0/24",
 		"double-colon-x2":  "2001::db8::1/48",
@@ -201,6 +203,13 @@ func generate() ([]policyCase, map[string]string) {
 		"rua-empty":       "; rua=",
 		"rua-scheme-only": "; rua=mailto:",
 		"rua-uppercase":   "; rua=MAILTO:a@example.net",
+		// The record ABNF: digits only, no sign, no leading zero; a tag
+		// has a name.
+		"unit-plus":         "; u=+64",
+		"unit-leading-zero": "; u=064",
+		"unit-zeros":        "; u=0064",
+		"unit-plain":        "; u=64",
+		"empty-tag-name":    "; =x",
 	} {
 		add("tags-"+name, base+tail, src)
 	}

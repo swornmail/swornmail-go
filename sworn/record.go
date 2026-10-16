@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/netip"
-	"strconv"
 	"strings"
 
 	"filippo.io/edwards25519"
@@ -107,6 +106,11 @@ func splitTags(txt string) ([][2]string, error) {
 			return nil, ErrRecordSyntax
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		// Every tag needs a name. An empty one used to pass here as an
+		// unknown tag while the Rust verifier rejected the record.
+		if k == "" {
+			return nil, ErrRecordSyntax
+		}
 		// v= must be the first tag present. Counting position among the
 		// emitted tags rather than among the raw segments is what makes a
 		// leading ";" or an empty segment unable to smuggle a tag ahead of it.
@@ -125,6 +129,23 @@ func splitTags(txt string) ([][2]string, error) {
 		pairs = append(pairs, [2]string{k, v})
 	}
 	return pairs, nil
+}
+
+// decimal parses a record number the way the ABNF writes it: digits only,
+// with no sign and no leading zero. strconv.Atoi would also accept "+64" and
+// "0064", spellings another parser can read differently.
+func decimal(v string) (int, bool) {
+	if v == "" || len(v) > 3 || (len(v) > 1 && v[0] == '0') {
+		return 0, false
+	}
+	n := 0
+	for i := 0; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '9' {
+			return 0, false
+		}
+		n = n*10 + int(v[i]-'0')
+	}
+	return n, true
 }
 
 // ParseRecord parses a <selector>._sworn key record. Unknown tags (including
@@ -235,8 +256,8 @@ func ParsePolicyRecord(txt string) (PolicyRecord, error) {
 				rec.Prefixes = append(rec.Prefixes, pfx)
 			}
 		case "u":
-			n, err := strconv.Atoi(v)
-			if err != nil || n < 1 || n > MaxUnitPrefixLen {
+			n, ok := decimal(v)
+			if !ok || n < 1 || n > MaxUnitPrefixLen {
 				return PolicyRecord{}, ErrRecordUnitInvalid
 			}
 			rec.Unit = uint8(n)
