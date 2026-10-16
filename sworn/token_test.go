@@ -654,6 +654,10 @@ func TestRecordRejects(t *testing.T) {
 		"unknown algorithm": "v=SWORN1; k=rsa; pk=" + pk,
 		"garbage key":       "v=SWORN1; k=ed25519; pk=notbase64!!",
 		"missing key":       "v=SWORN1; k=ed25519",
+		// 32 bytes, but y = 2 is not on the curve. Rust rejects this at parse
+		// (permerror); Go used to accept it and fail at verify (fail), so the
+		// same record gave two different results.
+		"key not a curve point": "v=SWORN1; k=ed25519; pk=AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 	}
 	for name, txt := range bad {
 		if _, err := ParseRecord(txt); err == nil {

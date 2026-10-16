@@ -7,6 +7,8 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+
+	"filippo.io/edwards25519"
 )
 
 // Record is a parsed <selector>._sworn key record, per I-D -01:
@@ -152,6 +154,15 @@ func ParseRecord(txt string) (Record, error) {
 		case "pk":
 			raw, err := base64.StdEncoding.DecodeString(v)
 			if err != nil || len(raw) != ed25519.PublicKeySize {
+				return Record{}, ErrRecordKey
+			}
+			// pk is untrusted DNS input. 32 bytes that aren't a curve point
+			// make the record malformed (permerror, which is never worse than
+			// no attestation), so the operator sees the mistake. Treating them
+			// as a key and failing every signature would hide it, and the
+			// Rust verifier already rejects such a record here. Non-canonical
+			// encodings of real points still decode, as they do in Rust.
+			if _, err := new(edwards25519.Point).SetBytes(raw); err != nil {
 				return Record{}, ErrRecordKey
 			}
 			rec.PublicKey = ed25519.PublicKey(raw)
