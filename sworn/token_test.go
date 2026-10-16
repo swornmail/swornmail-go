@@ -2,13 +2,16 @@ package sworn
 
 import (
 	"crypto/ed25519"
+	"crypto/sha512"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/netip"
 	"testing"
 	"time"
 
+	"filippo.io/edwards25519"
 	"github.com/fxamacker/cbor/v2"
 	cose "github.com/veraison/go-cose"
 )
@@ -213,6 +216,139 @@ func TestSignEmitsPolymorphicEdDSA(t *testing.T) {
 	}
 	if alg, err := msg.Headers.Protected.Algorithm(); err != nil || alg != cose.AlgorithmEdDSA {
 		t.Errorf("alg = %v (%v), want EdDSA (-8)", alg, err)
+	}
+}
+
+// smallOrderEncodings are encodings of points of small order (the 8-torsion),
+// including non-canonical spellings of the identity and of the order-2 point.
+// Under the cofactorless equation, a small-order key lets one fixed signature
+// verify for every message.
+var smallOrderEncodings = map[string]string{
+	"identity":               "0100000000000000000000000000000000000000000000000000000000000000",
+	"order 2 (y = -1)":       "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"order 4 (y = 0)":        "0000000000000000000000000000000000000000000000000000000000000000",
+	"order 4, sign bit set":  "0000000000000000000000000000000000000000000000000000000000000080",
+	"order 8":                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+	"order 8, other":         "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+	"identity, y = p + 1":    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"order 4, y = p (non-0)": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+}
+
+func TestSmallOrderDetection(t *testing.T) {
+	for name, h := range smallOrderEncodings {
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !smallOrder(b) {
+			t.Errorf("%s: not detected as small order", name)
+		}
+	}
+	if smallOrder(testPub) {
+		t.Error("a real public key was flagged as small order")
+	}
+}
+
+// The universal forgery: under a small-order key A, the signature R = identity,
+// S = 0 satisfies [S]B = R + [k]A for every message, because [k]A is the
+// identity whenever k is a multiple of A's order (always, for A = identity).
+// A domain that publishes such a key has in effect published its private key,
+// so strict verification must reject it rather than pass the token.
+func TestSmallOrderKeyForgeryRejected(t *testing.T) {
+	identity, _ := hex.DecodeString(smallOrderEncodings["identity"])
+	var msg cose.Sign1Message
+	if err := msg.UnmarshalCBOR(mustSign(t, basePayload())); err != nil {
+		t.Fatal(err)
+	}
+	msg.Signature = append(append([]byte{}, identity...), make([]byte, 32)...)
+	forged, err := msg.MarshalCBOR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifySignatureOnly(forged, ed25519.PublicKey(identity), inside, now); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("forgery under the identity key: err = %v, want ErrBadSignature", err)
+	}
+	// A small-order R under the real key fails the equation anyway; it must
+	// still be reported as a signature failure, not anything stranger.
+	if _, err := VerifySignatureOnly(forged, testPub, inside, now); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("small-order R under the real key: err = %v, want ErrBadSignature", err)
+	}
+}
+
+// The key check and the R check are independent, so each gets a case where it
+// is the only thing between a bad token and a pass.
+
+// identityRSigner signs as a key holder would, but with nonce 0: R is the
+// identity and S = k*a, which satisfies [S]B = R + [k]A. It records what it
+// signed so the test can confirm a lax verifier accepts the result.
+type identityRSigner struct{ signed []byte }
+
+func (*identityRSigner) Algorithm() cose.Algorithm { return cose.AlgorithmEdDSA }
+
+func (s *identityRSigner) Sign(_ io.Reader, content []byte) ([]byte, error) {
+	s.signed = content
+	h := sha512.Sum512(testSeed)
+	a, err := edwards25519.NewScalar().SetBytesWithClamping(h[:32])
+	if err != nil {
+		return nil, err
+	}
+	r := edwards25519.NewIdentityPoint().Bytes()
+	kh := sha512.New()
+	kh.Write(r)
+	kh.Write(testPub)
+	kh.Write(content)
+	k, err := edwards25519.NewScalar().SetUniformBytes(kh.Sum(nil))
+	if err != nil {
+		return nil, err
+	}
+	return append(r, edwards25519.NewScalar().Multiply(k, a).Bytes()...), nil
+}
+
+// A key holder signing with a small-order R. The key is the real one, so only
+// the R check rejects this; crypto/ed25519 on its own accepts it.
+func TestSmallOrderRFromKeyHolderRejected(t *testing.T) {
+	payload, err := encodePayload(basePayload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := cose.NewSign1Message()
+	msg.Payload = payload
+	msg.Headers.Protected[cose.HeaderLabelAlgorithm] = cose.AlgorithmEdDSA
+	msg.Headers.Protected[cose.HeaderLabelKeyID] = []byte(testSelector)
+	msg.Headers.Protected[cose.HeaderLabelContentType] = ContentType
+	signer := &identityRSigner{}
+	if err := msg.Sign(nil, nil, signer); err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(testPub, signer.signed, msg.Signature) {
+		t.Fatal("setup: a lax verifier should accept this signature")
+	}
+	tok, err := msg.MarshalCBOR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifySignatureOnly(tok, testPub, inside, now); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("small-order R from the key holder: err = %v, want ErrBadSignature", err)
+	}
+}
+
+// Under the identity key, R = B and S = 1 satisfy [S]B = R + [k]A for every
+// message. R is an ordinary point, so only the key check rejects this.
+func TestSmallOrderKeyWithOrdinaryRRejected(t *testing.T) {
+	identity, _ := hex.DecodeString(smallOrderEncodings["identity"])
+	var msg cose.Sign1Message
+	if err := msg.UnmarshalCBOR(mustSign(t, basePayload())); err != nil {
+		t.Fatal(err)
+	}
+	one := make([]byte, 32)
+	one[0] = 1
+	msg.Signature = append(edwards25519.NewGeneratorPoint().Bytes(), one...)
+	forged, err := msg.MarshalCBOR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifySignatureOnly(forged, ed25519.PublicKey(identity), inside, now); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("identity key with R = B: err = %v, want ErrBadSignature", err)
 	}
 }
 

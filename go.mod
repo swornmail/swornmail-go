@@ -3,6 +3,7 @@ module github.com/swornmail/swornmail-go
 go 1.24
 
 require (
+	filippo.io/edwards25519 v1.1.1
 	github.com/emersion/go-milter v0.4.1
 	github.com/fxamacker/cbor/v2 v2.7.0
 	github.com/veraison/go-cose v1.3.0

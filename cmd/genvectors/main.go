@@ -18,6 +18,7 @@ package main
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -26,8 +27,10 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"strings"
 	"time"
 
+	"filippo.io/edwards25519"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/swornmail/swornmail-go/sworn"
 	cose "github.com/veraison/go-cose"
@@ -53,6 +56,7 @@ type tc struct {
 	expect         string
 	expectAny      []string
 	operator, unit string // asserted on pass
+	pubHex         string // this case's own operator key; empty means the file's key
 }
 
 type vectorCase struct {
@@ -67,6 +71,9 @@ type vectorCase struct {
 	ExpectAny []string `json:"expect_any,omitempty"`
 	Operator  string   `json:"operator,omitempty"`
 	Unit      string   `json:"unit,omitempty"`
+	// PubHex overrides the file-level key for this case only. It is last and
+	// omitted when empty, so cases without it encode exactly as before.
+	PubHex string `json:"public_key_hex,omitempty"`
 }
 
 // authorizationCase exercises draft §Verification check 3 and the observed
@@ -211,6 +218,31 @@ func signWithAlg(alg cose.Algorithm) []byte {
 	return b
 }
 
+// identityRSigner signs as the key holder would, but with nonce 0: R is the
+// identity and S = k*a, which satisfies the cofactorless equation under the
+// real key. Only a check on R rejects it.
+type identityRSigner struct{}
+
+func (identityRSigner) Algorithm() cose.Algorithm { return cose.AlgorithmEdDSA }
+
+func (identityRSigner) Sign(_ io.Reader, content []byte) ([]byte, error) {
+	h := sha512.Sum512(priv.Seed())
+	a, err := edwards25519.NewScalar().SetBytesWithClamping(h[:32])
+	if err != nil {
+		return nil, err
+	}
+	r := edwards25519.NewIdentityPoint().Bytes()
+	kh := sha512.New()
+	kh.Write(r)
+	kh.Write(pub)
+	kh.Write(content)
+	k, err := edwards25519.NewScalar().SetUniformBytes(kh.Sum(nil))
+	if err != nil {
+		return nil, err
+	}
+	return append(r, edwards25519.NewScalar().Multiply(k, a).Bytes()...), nil
+}
+
 func goodProt() cose.ProtectedHeader {
 	return cose.ProtectedHeader{
 		cose.HeaderLabelContentType: sworn.ContentType,
@@ -266,6 +298,51 @@ func main() {
 	tampered := append([]byte(nil), good...)
 	tampered[len(tampered)-1] ^= 0xff
 	fullySpecified := signWithAlg(algEd25519)
+	// The universal forgery: R = identity, S = 0. Under a small-order key it
+	// satisfies the cofactorless equation for any message.
+	identityHex := "01" + strings.Repeat("00", 31)
+	smallOrderR := func() []byte {
+		msg := cose.NewSign1Message()
+		msg.Payload = buildMap(goodEntries()...)
+		msg.Headers.Protected = goodProt()
+		msg.Headers.Protected[cose.HeaderLabelAlgorithm] = cose.AlgorithmEdDSA
+		if err := msg.Sign(nil, nil, identityRSigner{}); err != nil {
+			panic(err)
+		}
+		b, err := msg.MarshalCBOR()
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}()
+	// Under the identity key, R = B and S = 1 verify for any message.
+	ordinaryRUnderIdentityKey := func() []byte {
+		var msg cose.Sign1Message
+		if err := msg.UnmarshalCBOR(good); err != nil {
+			panic(err)
+		}
+		one := make([]byte, 32)
+		one[0] = 1
+		msg.Signature = append(edwards25519.NewGeneratorPoint().Bytes(), one...)
+		b, err := msg.MarshalCBOR()
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}()
+	universalForgery := func() []byte {
+		var msg cose.Sign1Message
+		if err := msg.UnmarshalCBOR(good); err != nil {
+			panic(err)
+		}
+		id, _ := hex.DecodeString(identityHex)
+		msg.Signature = append(id, make([]byte, 32)...)
+		b, err := msg.MarshalCBOR()
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}()
 	fullySpecifiedTampered := append([]byte(nil), fullySpecified...)
 	fullySpecifiedTampered[len(fullySpecifiedTampered)-1] ^= 0xff
 	untagged := good
@@ -477,6 +554,25 @@ func main() {
 		// valid Ed25519 signature labelled ES256 is a header fault.
 		{name: "alg_es256_substituted", section: "token", token: signWithAlg(cose.AlgorithmES256),
 			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "header_confusion"},
+
+		// --- strict Ed25519 (appended; earlier cases unchanged) ---
+		//
+		// §token: verification is strict, so a small-order public key is a
+		// signature failure. Under the identity key, R = identity and S = 0
+		// verify for every message with the cofactorless equation; a verifier
+		// that doesn't check passes a token nobody signed. This case carries
+		// its own key in public_key_hex.
+		{name: "small_order_public_key", section: "token", token: universalForgery,
+			pubHex: identityHex, source: "2001:db8:f00:1234::a:1", now: t0 + 1800,
+			expect: "bad_signature"},
+		// The same rule, with each check on its own. Under the identity key with
+		// an ordinary R (B) and S = 1, only the key check rejects; a key holder
+		// signing with R = identity under the real key, only the R check does.
+		{name: "small_order_public_key_ordinary_r", section: "token", token: ordinaryRUnderIdentityKey,
+			pubHex: identityHex, source: "2001:db8:f00:1234::a:1", now: t0 + 1800,
+			expect: "bad_signature"},
+		{name: "small_order_r_component", section: "token", token: smallOrderR,
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "bad_signature"},
 	}
 
 	// Self-check against the reference implementation; authored expectations
@@ -488,7 +584,16 @@ func main() {
 			failures = append(failures, c.name+": bad source addr")
 			continue
 		}
-		res, verr := sworn.VerifySignatureOnly(c.token, pub, src, time.Unix(c.now, 0).UTC())
+		key := pub
+		if c.pubHex != "" {
+			b, err := hex.DecodeString(c.pubHex)
+			if err != nil {
+				failures = append(failures, c.name+": bad public_key_hex")
+				continue
+			}
+			key = ed25519.PublicKey(b)
+		}
+		res, verr := sworn.VerifySignatureOnly(c.token, key, src, time.Unix(c.now, 0).UTC())
 		got := sworn.Reason(verr)
 		ok := got == c.expect
 		for _, e := range c.expectAny {
@@ -707,6 +812,7 @@ func main() {
 			Source:   c.source, Now: c.now,
 			Expect: c.expect, ExpectAny: c.expectAny,
 			Operator: c.operator, Unit: c.unit,
+			PubHex: c.pubHex,
 		}
 	}
 
