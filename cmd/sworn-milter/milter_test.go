@@ -55,6 +55,36 @@ func TestEvaluatePass(t *testing.T) {
 	}
 }
 
+// A receiver behind its own NAT64 prefix configures it as ineligible. The
+// same records that give a pass above then give none, because the source is
+// inside the configured prefix and so can't be matched to any operator.
+func TestEvaluateConfiguredIneligiblePrefixIsNone(t *testing.T) {
+	m := milterWith(map[string][]string{
+		rev64:                                 {"v=SWORN1; d=mailer.example.com"},
+		"_prefixes._sworn.mailer.example.com": {"v=SWORN1; p=2001:db8:f00::/48; u=64"},
+	}, rev64src)
+	m.ineligible = []netip.Prefix{netip.MustParsePrefix("2001:db8:f00:1234::/64")}
+	if got, want := m.evaluate(), "mx.example; sworn=none"; got != want {
+		t.Errorf("evaluate()\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestIneligiblePrefixFlag(t *testing.T) {
+	var p prefixFlag
+	if err := p.Set("64:ff9b:abcd::/96,2001:db8:1::/48"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Set("2001:db8:2::/48"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p) != 3 {
+		t.Fatalf("got %v, want three prefixes across both uses", p)
+	}
+	if err := p.Set("192.0.2.0/24"); err == nil {
+		t.Error("an IPv4 prefix was accepted")
+	}
+}
+
 // An operator publishing t=y has not accepted accountability, so the stamped
 // result must be none — never pass — with the would-be result attached.
 func TestEvaluateTestingModeIsNotPass(t *testing.T) {

@@ -44,6 +44,10 @@ type Options struct {
 	// IsPublicSuffix, if set, decides the candidate-walk stop instead of the
 	// default "fewer than 3 labels" rule (I-D -01 §Discovery step 2).
 	IsPublicSuffix func(string) bool
+	// IneligiblePrefixes are the receiver's own extra ineligible source
+	// ranges, such as its NAT64 or SIIT translation prefixes
+	// (sworn.VerifyOptions).
+	IneligiblePrefixes []netip.Prefix
 }
 
 type discovery struct {
@@ -58,7 +62,9 @@ type discovery struct {
 // temporary DNS failure or budget exhaustion. Ineligible sources (not ordinary
 // global-unicast IPv6) yield ErrNone: Mode 1 attests IPv6 space only.
 func Discover(ctx context.Context, r Resolver, source netip.Addr, opt Options) (Result, error) {
-	if !source.Is6() || source.Is4In6() {
+	// An ineligible source is never inside an attested prefix, so it ends as
+	// none before any query rather than spending the budget to find nothing.
+	if !(sworn.VerifyOptions{IneligiblePrefixes: opt.IneligiblePrefixes}).Eligible(source) {
 		return Result{}, ErrNone
 	}
 	d := &discovery{ctx: ctx, r: r, budget: MaxQueries, opt: opt}

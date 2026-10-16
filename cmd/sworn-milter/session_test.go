@@ -24,7 +24,7 @@ func startSession(t *testing.T, txt map[string][]string) *milter.ClientSession {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newServer("mx.example", fakeResolver{txt: txt}, time.Second)
+	srv := newServer("mx.example", fakeResolver{txt: txt}, time.Second, nil)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 

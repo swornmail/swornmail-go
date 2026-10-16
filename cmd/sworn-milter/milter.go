@@ -20,6 +20,7 @@ type swornMilter struct {
 	authservID string
 	resolver   discover.Resolver
 	dnsTimeout time.Duration
+	ineligible []netip.Prefix
 
 	source     netip.Addr
 	haveSource bool
@@ -33,10 +34,10 @@ type swornMilter struct {
 
 // newServer builds the milter server. main and the session tests share it, so
 // the tests run against the protocol options Postfix actually negotiates.
-func newServer(authservID string, r discover.Resolver, dnsTimeout time.Duration) *milter.Server {
+func newServer(authservID string, r discover.Resolver, dnsTimeout time.Duration, ineligible []netip.Prefix) *milter.Server {
 	return &milter.Server{
 		NewMilter: func() milter.Milter {
-			return &swornMilter{authservID: authservID, resolver: r, dnsTimeout: dnsTimeout}
+			return &swornMilter{authservID: authservID, resolver: r, dnsTimeout: dnsTimeout, ineligible: ineligible}
 		},
 		Actions:  milter.OptAddHeader | milter.OptChangeHeader,
 		Protocol: milter.OptNoBody, // skip body chunks; we act on headers + end of message
@@ -90,6 +91,6 @@ func (s *swornMilter) evaluate() string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.dnsTimeout)
 	defer cancel()
-	res, err := discover.Discover(ctx, s.resolver, s.source, discover.Options{})
+	res, err := discover.Discover(ctx, s.resolver, s.source, discover.Options{IneligiblePrefixes: s.ineligible})
 	return discover.AuthResults(s.authservID, res, err)
 }

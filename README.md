@@ -146,6 +146,15 @@ smtpd_milters = { inet:127.0.0.1:10025, default_action=accept }
   haproxy`); otherwise every connection is evaluated as the balancer's address.
   Only do that on a listener nothing but the proxy can reach, or anyone can
   claim an attested address.
+- **`--ineligible-prefix`** lists IPv6 prefixes the milter must never match
+  to an operator: comma-separated, and the flag may repeat. **If this host
+  reaches IPv4 clients through NAT64 or SIIT, list the translation prefix
+  here.** Every translated client appears inside that one prefix, so a
+  record covering it would otherwise be attributed for all of them. The same
+  goes for any of your own relays that carry outside traffic. A source in a
+  listed prefix gets `sworn=none` with no DNS lookup. A malformed prefix
+  stops the milter at startup. `sworn verify` and `sworn discover` take the
+  same flag.
 - **`--authserv-id`** defaults to the hostname. Set it to the authserv-id your
   downstream filters trust; inbound results claiming that id are removed. The
   match is deliberately loose (case, a trailing dot, odd whitespace,

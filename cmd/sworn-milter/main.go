@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -27,12 +28,15 @@ import (
 	"time"
 
 	milter "github.com/emersion/go-milter"
+	"github.com/swornmail/swornmail-go/sworn"
 )
 
 func main() {
 	listen := flag.String("listen", "tcp:127.0.0.1:10025", "listen address: tcp:host:port or unix:/path")
 	authservID := flag.String("authserv-id", defaultAuthservID(), "authserv-id to stamp and to strip inbound results for")
 	dnsTimeout := flag.Duration("dns-timeout", 5*time.Second, "per-connection DNS discovery timeout")
+	var ineligible prefixFlag
+	flag.Var(&ineligible, "ineligible-prefix", "IPv6 prefixes to treat as ineligible sources, comma-separated or repeated: your NAT64/SIIT translation prefixes, and any of your own relays")
 	flag.Parse()
 
 	network, address, ok := strings.Cut(*listen, ":")
@@ -49,7 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := newServer(*authservID, net.DefaultResolver, *dnsTimeout)
+	server := newServer(*authservID, net.DefaultResolver, *dnsTimeout, []netip.Prefix(ineligible))
 
 	go func() {
 		sig := make(chan os.Signal, 1)
@@ -66,6 +70,22 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sworn-milter: serve:", err)
 		os.Exit(1)
 	}
+}
+
+// prefixFlag collects --ineligible-prefix values. A bad prefix stops the
+// milter at startup: running without the list it was given would let
+// translated traffic be attributed as if it came from one sender.
+type prefixFlag []netip.Prefix
+
+func (p *prefixFlag) String() string { return fmt.Sprint([]netip.Prefix(*p)) }
+
+func (p *prefixFlag) Set(v string) error {
+	ps, err := sworn.ParseIneligiblePrefixes(v)
+	if err != nil {
+		return err
+	}
+	*p = append(*p, ps...)
+	return nil
 }
 
 func defaultAuthservID() string {

@@ -22,6 +22,8 @@ func cmdVerify(args []string) int {
 	policyTXT := fs.String("policy", "", "operator policy TXT content (offline; skips policy DNS)")
 	nowUnix := fs.Int64("now", 0, "verify as of this Unix time (0 = wall clock)")
 	asJSON := fs.Bool("json", false, "JSON output")
+	var ineligible prefixFlag
+	fs.Var(&ineligible, "ineligible-prefix", "extra IPv6 prefixes to treat as ineligible sources (comma-separated or repeated)")
 	tokenArg, rest := leadingPositional(args)
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -48,7 +50,7 @@ func cmdVerify(args []string) int {
 	if *nowUnix != 0 {
 		now = time.Unix(*nowUnix, 0).UTC()
 	}
-	prepared, perr := sworn.PrepareVerification(token, src, now)
+	prepared, perr := sworn.PrepareVerificationWith(token, src, now, sworn.VerifyOptions{IneligiblePrefixes: ineligible})
 	if perr != nil {
 		return report(*asJSON, verifyOutput{Result: sworn.AuthResult(perr), Reason: sworn.Reason(perr)})
 	}
