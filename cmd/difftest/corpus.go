@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/swornmail/swornmail-go/sworn"
 	cose "github.com/veraison/go-cose"
 )
@@ -202,6 +203,27 @@ func generate(fuzzN int) []caseT {
 			panic(fmt.Sprintf("no padding gives a %d-octet token", n))
 		}
 	}
+
+	// --- payload value types: tags, bignums, times past 2^63 ---
+	timed := func(iat, exp any) []kv {
+		return []kv{{1, "mailer.example.com"}, {2, prefixWire("2001:db8:f00::", 48)},
+			{3, uint64(64)}, {4, iat}, {5, exp}, {6, "mta"}}
+	}
+	add("type_operator_tag32", signRaw(kv{1, cbor.Tag{Number: 32, Content: "mailer.example.com"}},
+		kv{2, prefixWire("2001:db8:f00::", 48)}, kv{3, uint64(64)}, kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, "mta"}), insideSrc, t0+1800)
+	add("type_prefix_tag24", signRaw(kv{1, "mailer.example.com"}, kv{2, cbor.Tag{Number: 24, Content: prefixWire("2001:db8:f00::", 48)}},
+		kv{3, uint64(64)}, kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, "mta"}), insideSrc, t0+1800)
+	add("type_unit_bignum", signRaw(kv{1, "mailer.example.com"}, kv{2, prefixWire("2001:db8:f00::", 48)},
+		kv{3, cbor.Tag{Number: 2, Content: []byte{64}}}, kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, "mta"}), insideSrc, t0+1800)
+	add("type_iat_tag1", signRaw(timed(cbor.Tag{Number: 1, Content: uint64(t0)}, uint64(expU))...), insideSrc, t0+1800)
+	add("type_exp_bignum", signRaw(timed(uint64(t0), cbor.Tag{Number: 2, Content: []byte{byte(expU >> 24), byte(expU >> 16), byte(expU >> 8), byte(expU)}})...), insideSrc, t0+1800)
+	add("type_role_tag32", signRaw(kv{1, "mailer.example.com"}, kv{2, prefixWire("2001:db8:f00::", 48)},
+		kv{3, uint64(64)}, kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, cbor.Tag{Number: 32, Content: "mta"}}), insideSrc, t0+1800)
+	add("type_unknown_key_bignum", signRaw(append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, cbor.Tag{Number: 3, Content: []byte{9}}})...), insideSrc, t0+1800)
+	add("time_iat_2p63", signRaw(timed(uint64(1<<63+100), uint64(1<<63+3700))...), insideSrc, t0+1800)
+	add("time_straddle_2p63", signRaw(timed(uint64(1<<63-1800), uint64(1<<63+1800))...), insideSrc, t0+1800)
+	add("time_max_uint64", signRaw(timed(uint64(1<<64-3601), uint64(1<<64-1))...), insideSrc, t0+1800)
+	add("time_lifetime_over_cap_2p63", signRaw(timed(uint64(1<<63-1), uint64(1<<63+86400))...), insideSrc, t0+1800)
 
 	// --- unvectored judgment calls (Rust report flagged these) ---
 	add("operator_trailing_dot", signRaw(kv{1, "mailer.example.com."}, kv{2, prefixWire("2001:db8:f00::", 48)},

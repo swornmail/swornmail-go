@@ -313,6 +313,12 @@ func ValidDomain(s string) bool {
 var (
 	detEnc cbor.EncMode
 	detDec cbor.DecMode
+	// fieldDec decodes the values of the payload keys the draft defines.
+	// The CDDL types them tstr, bstr and uint; a tagged value is none of
+	// those, and a bignum is CDDL's biguint, a different type. Without this
+	// the decoder strips tags and folds a bignum into an integer, so Go
+	// would accept tokens the Rust verifier rejects.
+	fieldDec cbor.DecMode
 )
 
 func init() {
@@ -331,7 +337,19 @@ func init() {
 		panic(err)
 	}
 	detDec = d
+	f, err := cbor.DecOptions{TagsMd: cbor.TagsForbidden}.DecMode()
+	if err != nil {
+		panic(err)
+	}
+	fieldDec = f
 }
+
+// maxUnixSeconds bounds the times held in a Payload. CDDL uint runs to
+// 2^64-1, past what time.Time can hold. Any time this large is about 1.5e11
+// years in the future, so clamping to it keeps a token that is merely
+// not yet valid from being misread as a malformed one, and changes no
+// verdict: the bounds on the raw values are checked before clamping.
+const maxUnixSeconds = 1 << 62
 
 func encodePayload(p Payload) ([]byte, error) {
 	if !ValidDomain(p.Operator) {
@@ -359,8 +377,8 @@ func decodePayload(b []byte) (Payload, error) {
 	var (
 		p   Payload
 		pfx []byte
-		iat int64
-		exp int64
+		iat uint64
+		exp uint64
 	)
 	// REQUIRED keys.
 	required := []struct {
@@ -375,7 +393,9 @@ func decodePayload(b []byte) (Payload, error) {
 		if !ok {
 			return Payload{}, ErrMalformed
 		}
-		if err := cbor.Unmarshal(rm, f.dst); err != nil {
+		// Untrusted input: a wrong type, a tag, or a negative iat/exp
+		// (decoded into uint64) is malformed.
+		if err := fieldDec.Unmarshal(rm, f.dst); err != nil {
 			return Payload{}, ErrMalformed
 		}
 	}
@@ -383,13 +403,10 @@ func decodePayload(b []byte) (Payload, error) {
 		return Payload{}, ErrMalformed
 	}
 	p.Operator = strings.ToLower(p.Operator)
-	if iat < 0 || exp < 0 {
-		return Payload{}, ErrMalformed
-	}
 	// OPTIONAL unit; absent means default.
 	p.Unit = DefaultUnitPrefixLen
 	if rm, ok := raw[keyUnit]; ok {
-		if err := cbor.Unmarshal(rm, &p.Unit); err != nil {
+		if err := fieldDec.Unmarshal(rm, &p.Unit); err != nil {
 			return Payload{}, ErrMalformed
 		}
 	}
@@ -401,7 +418,15 @@ func decodePayload(b []byte) (Payload, error) {
 		return Payload{}, err
 	}
 	p.Prefix = prefix
-	p.IssuedAt, p.Expires = time.Unix(iat, 0).UTC(), time.Unix(exp, 0).UTC()
+	// Validity bounds are checked on the raw values, before any clamping.
+	if exp <= iat {
+		return Payload{}, ErrBadValidity
+	}
+	if exp-iat > uint64(MaxTokenLifetime/time.Second) {
+		return Payload{}, ErrLifetimeTooLong
+	}
+	p.IssuedAt = time.Unix(int64(min(iat, maxUnixSeconds)), 0).UTC()
+	p.Expires = time.Unix(int64(min(exp, maxUnixSeconds)), 0).UTC()
 	return p, nil
 }
 
@@ -610,15 +635,10 @@ func PrepareVerificationWith(token []byte, source netip.Addr, now time.Time, opt
 	if err != nil {
 		return nil, err
 	}
+	// decodePayload also checks the validity bounds (exp > iat, lifetime).
 	p, err := decodePayload(msg.Payload)
 	if err != nil {
 		return nil, err
-	}
-	if !p.Expires.After(p.IssuedAt) {
-		return nil, ErrBadValidity
-	}
-	if p.Expires.Sub(p.IssuedAt) > MaxTokenLifetime {
-		return nil, ErrLifetimeTooLong
 	}
 	if int(p.Unit) < p.Prefix.Bits() || p.Unit > MaxUnitPrefixLen {
 		return nil, ErrBadUnit
@@ -653,7 +673,8 @@ func PrepareVerificationWith(token []byte, source netip.Addr, now time.Time, opt
 	}, nil
 }
 
-// ParseUnverified runs only header and payload syntax checks and returns the
+// ParseUnverified runs only header and payload checks (syntax, value types,
+// and the exp > iat and lifetime bounds) and returns the
 // canonical DNS names. It is retained for callers that inspect tokens, but it
 // is not sufficient to decide whether DNS may be queried: complete verifiers
 // must use PrepareVerification so time, unit, and source checks run first.
