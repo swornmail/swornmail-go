@@ -225,6 +225,144 @@ func generate(fuzzN int) []caseT {
 	add("time_max_uint64", signRaw(timed(uint64(1<<64-3601), uint64(1<<64-1))...), insideSrc, t0+1800)
 	add("time_lifetime_over_cap_2p63", signRaw(timed(uint64(1<<63-1), uint64(1<<63+86400))...), insideSrc, t0+1800)
 
+	// --- payload major types: the shapes a lenient decoder coerces ---
+	//
+	// with replaces one value in a valid payload; keyed replaces one key.
+	with := func(key int, v any) []kv {
+		es := goodEntries("2001:db8:f00::", 48, 64, "mta")
+		es[key-1].v = v
+		return es
+	}
+	keyed := func(key int, k any) []kv {
+		es := goodEntries("2001:db8:f00::", 48, 64, "mta")
+		es[key-1].k = k
+		return es
+	}
+	null, undefined := cbor.RawMessage{0xf6}, cbor.RawMessage{0xf7}
+	prefixArray := make([]uint64, 17)
+	for i, b := range prefixWire("2001:db8:f00::", 48) {
+		prefixArray[i] = uint64(b)
+	}
+	for _, c := range []struct {
+		name    string
+		entries []kv
+	}{
+		{"major_operator_null", with(1, null)},
+		{"major_operator_bstr", with(1, []byte("mailer.example.com"))},
+		{"major_prefix_null", with(2, null)},
+		{"major_prefix_tstr", with(2, string(prefixWire("2400:cb00::", 48)))},
+		{"major_prefix_int_array", with(2, prefixArray)},
+		{"major_unit_null", with(3, null)},
+		{"major_unit_undefined", with(3, undefined)},
+		{"major_unit_simple64", with(3, cbor.RawMessage{0xf8, 64})},
+		{"major_unit_simple16", with(3, cbor.RawMessage{0xf0})},
+		{"major_unit_true", with(3, true)},
+		{"major_unit_float", with(3, float64(64))},
+		{"major_unit_tstr", with(3, "64")},
+		{"major_iat_null", with(4, null)},
+		{"major_iat_float", with(4, float64(t0))},
+		{"major_exp_null", with(5, null)},
+		{"major_exp_undefined", with(5, undefined)},
+		{"major_role_null", with(6, null)},
+		{"major_role_bstr", with(6, []byte("mta"))},
+		{"major_operator_self_described", with(1, cbor.Tag{Number: 55799, Content: "mailer.example.com"})},
+		{"major_prefix_self_described", with(2, cbor.Tag{Number: 55799, Content: prefixWire("2001:db8:f00::", 48)})},
+		{"major_unit_self_described", with(3, cbor.Tag{Number: 55799, Content: uint64(64)})},
+		{"major_iat_self_described", with(4, cbor.Tag{Number: 55799, Content: uint64(t0)})},
+		{"major_unknown_self_described", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, cbor.Tag{Number: 55799, Content: "x"}})},
+		// An unknown key's value is `any`: nothing about it is held to a type.
+		{"any_unknown_null", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, null})},
+		{"any_unknown_undefined", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, undefined})},
+		{"any_unknown_float", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, float64(1.5)})},
+		{"any_unknown_array", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, []uint64{1, 2}})},
+		{"any_unknown_map_duplicate_keys", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, cbor.RawMessage{0xa2, 0x01, 0x01, 0x01, 0x02}})},
+		{"any_unknown_map_text_key", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{99, map[string]uint64{"a": 1}})},
+		// Keys: `* int => any`. A tag, a bignum or a float is not an int.
+		{"key_operator_self_described", keyed(1, cbor.Tag{Number: 55799, Content: uint64(1)})},
+		{"key_operator_bignum", keyed(1, cbor.Tag{Number: 2, Content: []byte{1}})},
+		{"key_unit_self_described", keyed(3, cbor.Tag{Number: 55799, Content: uint64(3)})},
+		{"key_unit_bignum", keyed(3, cbor.Tag{Number: 2, Content: []byte{3}})},
+		{"key_unit_float", keyed(3, float64(3))},
+		{"key_unknown_self_described", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{cbor.Tag{Number: 55799, Content: uint64(99)}, "x"})},
+		{"key_unknown_bignum", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{cbor.Tag{Number: 2, Content: []byte{99}}, "x"})},
+		{"key_unknown_negative_bignum", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{cbor.Tag{Number: 3, Content: []byte{99}}, "x"})},
+		// Every CBOR integer is a CDDL int, however wide: unknown, ignored.
+		{"key_unknown_2p31", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{uint64(1 << 31), "x"})},
+		{"key_unknown_2p63", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{uint64(1 << 63), "x"})},
+		{"key_unknown_max_uint64", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{uint64(1<<64 - 1), "x"})},
+		{"key_unknown_min_nint", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{cbor.RawMessage{0x3b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, "x"})},
+		{"key_unknown_nint_below_int64", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{cbor.RawMessage{0x3b, 0x80, 0, 0, 0, 0, 0, 0, 0}, "x"})},
+		{"key_duplicate_2p63", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{uint64(1 << 63), "x"}, kv{uint64(1 << 63), "y"})},
+		{"key_duplicate_min_nint", append(goodEntries("2001:db8:f00::", 48, 64, "mta"),
+			kv{cbor.RawMessage{0x3b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, "x"},
+			kv{cbor.RawMessage{0x3b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, "y"})},
+		{"key_duplicate_non_minimal", append(goodEntries("2001:db8:f00::", 48, 64, "mta"), kv{uint64(99), "x"}, kv{cbor.RawMessage{0x18, 99}, "y"})},
+		{"key_operator_non_minimal", keyed(1, cbor.RawMessage{0x18, 1})},
+	} {
+		add(c.name, signRaw(c.entries...), insideSrc, t0+1800)
+	}
+	good := buildMap(goodEntries("2001:db8:f00::", 48, 64, "mta")...)
+	add("payload_self_described", signWith(append([]byte{0xd9, 0xd9, 0xf7}, good...), goodProt(), nil), insideSrc, t0+1800)
+	add("payload_tag24", signWith(append([]byte{0xd8, 24}, good...), goodProt(), nil), insideSrc, t0+1800)
+	add("payload_trailing_octet", signWith(append(append([]byte(nil), good...), 0x00), goodProt(), nil), insideSrc, t0+1800)
+	add("payload_array", signWith([]byte{0x80}, goodProt(), nil), insideSrc, t0+1800)
+
+	// --- envelope and header types: the same coercions one layer up ---
+	enc := func(v any) []byte { b, _ := detEnc.Marshal(v); return b }
+	selfDescribed := func(b []byte) []byte { return append([]byte{0xd9, 0xd9, 0xf7}, b...) }
+	prot := func(alg, cty, kid kv) []byte { return buildMap(alg, cty, kid) }
+	algKV, ctyKV, kidKV := kv{1, int64(-8)}, kv{3, sworn.ContentType}, kv{4, []byte(selector)}
+	bignum := func(n byte) cbor.Tag { return cbor.Tag{Number: 2, Content: []byte{n}} }
+	goodProtRaw := prot(algKV, ctyKV, kidKV)
+	add("envelope_hand_built", envelope(goodProtRaw, good, nil), insideSrc, t0+1800)
+	for _, c := range []struct {
+		name string
+		prot []byte
+	}{
+		{"header_label_alg_bignum", prot(kv{bignum(1), int64(-8)}, ctyKV, kidKV)},
+		{"header_label_cty_bignum", prot(algKV, kv{bignum(3), sworn.ContentType}, kidKV)},
+		{"header_label_kid_bignum", prot(algKV, ctyKV, kv{bignum(4), []byte(selector)})},
+		{"header_label_kid_self_described", prot(algKV, ctyKV, kv{cbor.Tag{Number: 55799, Content: uint64(4)}, []byte(selector)})},
+		{"header_label_unknown_bignum", buildMap(algKV, ctyKV, kidKV, kv{bignum(99), "x"})},
+		{"header_alg_negative_bignum", prot(kv{1, cbor.Tag{Number: 3, Content: []byte{7}}}, ctyKV, kidKV)},
+		{"header_alg_self_described", prot(kv{1, cbor.Tag{Number: 55799, Content: int64(-8)}}, ctyKV, kidKV)},
+		{"header_cty_self_described", prot(algKV, kv{3, cbor.Tag{Number: 55799, Content: sworn.ContentType}}, kidKV)},
+		{"header_kid_self_described", prot(algKV, ctyKV, kv{4, cbor.Tag{Number: 55799, Content: []byte(selector)}})},
+		{"header_kid_null", prot(algKV, ctyKV, kv{4, null})},
+		{"header_cty_null", prot(algKV, kv{3, null}, kidKV)},
+		{"header_alg_null", prot(kv{1, null}, ctyKV, kidKV)},
+		{"header_alg_simple", prot(kv{1, cbor.RawMessage{0xf8, 0x27}}, ctyKV, kidKV)},
+		{"header_kid_int_array", prot(algKV, ctyKV, kv{4, []uint64{'2', '0', '2', '6', 'a'}})},
+		{"header_protected_self_described", selfDescribed(goodProtRaw)},
+	} {
+		add(c.name, envelope(c.prot, good, nil), insideSrc, t0+1800)
+	}
+	for _, c := range []struct {
+		name   string
+		mutate func(items [][]byte)
+	}{
+		{"envelope_protected_self_described", func(items [][]byte) { items[0] = selfDescribed(items[0]) }},
+		{"envelope_unprotected_self_described", func(items [][]byte) { items[1] = selfDescribed(items[1]) }},
+		{"envelope_payload_self_described", func(items [][]byte) { items[2] = selfDescribed(items[2]) }},
+		{"envelope_signature_self_described", func(items [][]byte) { items[3] = selfDescribed(items[3]) }},
+		{"envelope_unprotected_null", func(items [][]byte) { items[1] = null }},
+		{"envelope_protected_int_array", func(items [][]byte) {
+			arr := make([]uint64, len(goodProtRaw))
+			for i, b := range goodProtRaw {
+				arr[i] = uint64(b)
+			}
+			items[0] = enc(arr)
+		}},
+		{"envelope_unprotected_label_bignum", func(items [][]byte) { items[1] = buildMap(kv{bignum(99), "x"}) }},
+		{"envelope_unprotected_kid_bignum_label", func(items [][]byte) { items[1] = buildMap(kv{bignum(4), []byte(selector)}) }},
+		{"envelope_unprotected_label_self_described", func(items [][]byte) {
+			items[1] = buildMap(kv{cbor.Tag{Number: 55799, Content: uint64(99)}, "x"})
+		}},
+	} {
+		add(c.name, envelope(goodProtRaw, good, c.mutate), insideSrc, t0+1800)
+	}
+	add("envelope_outer_self_described", selfDescribed(envelope(goodProtRaw, good, nil)), insideSrc, t0+1800)
+
 	// --- unvectored judgment calls (Rust report flagged these) ---
 	add("operator_trailing_dot", signRaw(kv{1, "mailer.example.com."}, kv{2, prefixWire("2001:db8:f00::", 48)},
 		kv{3, uint64(64)}, kv{4, uint64(t0)}, kv{5, uint64(expU)}, kv{6, "mta"}), insideSrc, t0+1800)
