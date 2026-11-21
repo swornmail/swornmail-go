@@ -93,6 +93,23 @@ func signWith(payload []byte, prot cose.ProtectedHeader, unprot cose.Unprotected
 	return b
 }
 
+// envelope assembles a tagged COSE_Sign1 from already-encoded items, signing
+// over prot and payload as go-cose would. mutate may replace any of the four
+// items, so a case can put CBOR in the envelope that go-cose refuses to emit.
+func envelope(prot, payload []byte, mutate func(items [][]byte)) []byte {
+	enc := func(v any) []byte { b, _ := detEnc.Marshal(v); return b }
+	sig := ed25519.Sign(priv, enc([]any{"Signature1", prot, []byte{}, payload}))
+	items := [][]byte{enc(prot), {0xa0}, enc(payload), enc(sig)}
+	if mutate != nil {
+		mutate(items)
+	}
+	out := []byte{0xd2, 0x84}
+	for _, item := range items {
+		out = append(out, item...)
+	}
+	return out
+}
+
 // algEd25519 is the fully-specified COSE identifier for Ed25519 (RFC 9864).
 const algEd25519 cose.Algorithm = -19
 

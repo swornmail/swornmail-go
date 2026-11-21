@@ -171,50 +171,172 @@ type Result struct {
 	RUA     string
 }
 
-// payloadKeys decodes the payload map and enforces the -01 payload CDDL rule
-// that every key is an integer (`* int => any`). Negative keys are legal and
-// unknown, so they are dropped rather than rejected; the defined keys 1..6 are
-// all positive.
-//
-// Decoding straight into map[int]cbor.RawMessage is not sufficient: the CBOR
-// library coerces a simple value into the integer it encodes, so `simple(1)`
-// arrives as key 1. A payload carrying `{simple(1): "evil.example", 2: ...}`
-// and no integer key 1 therefore decoded cleanly, with the operator taken from
-// the simple value — while a reader that honours `* int => any` rejects the
-// same signed payload outright. One token, two operator domains, depending on
-// which implementation read it.
-//
-// Presenting both `1` and `simple(1)` does NOT get through: the decoder's
-// duplicate-key check fires on the coerced key, in either order. Verified, not
-// assumed — the exploitable shape is the lone simple value standing in for a
-// required field, which is the case the test below pins.
-//
-// Keys are therefore decoded as `any` and type-checked before anything reads
-// them.
-func payloadKeys(b []byte) (map[int]cbor.RawMessage, error) {
-	var loose map[any]cbor.RawMessage
-	if err := detDec.Unmarshal(b, &loose); err != nil {
-		return nil, ErrMalformed
+// CBOR major types (RFC 8949 §3.1), as far as the payload CDDL names them.
+const (
+	majorUint  = 0
+	majorNint  = 1
+	majorBytes = 2
+	majorText  = 3
+	majorMap   = 5
+)
+
+// cborHead reads the major type and argument of the well-formed CBOR item
+// that starts b, and how many octets the two occupy. ok is false for an
+// argument that is not a plain count: an indefinite length, a reserved value.
+func cborHead(b []byte) (major byte, arg uint64, size int, ok bool) {
+	if len(b) == 0 {
+		return 0, 0, 0, false
 	}
-	raw := make(map[int]cbor.RawMessage, len(loose))
-	for k, v := range loose {
-		switch n := k.(type) {
-		case uint64:
-			if n > uint64(^uint(0)>>1) {
-				return nil, ErrMalformed
-			}
-			if _, dup := raw[int(n)]; dup {
-				return nil, ErrMalformed
-			}
-			raw[int(n)] = v
-		case int64:
-			// A negative key: valid CDDL `int`, never a defined field, ignored.
-		default:
-			// Text strings, byte strings, simple values, floats: not `int`.
+	major, info := b[0]>>5, b[0]&0x1f
+	if info < 24 {
+		return major, uint64(info), 1, true
+	}
+	if info > 27 {
+		return major, 0, 1, false
+	}
+	size = 1 + 1<<(info-24)
+	if len(b) < size {
+		return 0, 0, 0, false
+	}
+	for _, c := range b[1:size] {
+		arg = arg<<8 | uint64(c)
+	}
+	return major, arg, size, true
+}
+
+// nextItem splits the first well-formed CBOR item off b. The item is sliced
+// from b, never taken from the decoder's own output: asked for the raw item,
+// the decoder still drops a leading self-described tag, which would hide it
+// from the major-type checks the callers make.
+func nextItem(b []byte) (item cbor.RawMessage, rest []byte, err error) {
+	var skipped cbor.RawMessage
+	if rest, err = detDec.UnmarshalFirst(b, &skipped); err != nil {
+		return nil, nil, ErrMalformed
+	}
+	return b[:len(b)-len(rest)], rest, nil
+}
+
+// payloadKeys splits the payload map into the values of the defined keys and
+// enforces the -01 payload CDDL rule that every key is an integer
+// (`* int => any`). Unknown integer keys are legal, so they are dropped
+// rather than rejected, however wide or negative: CDDL `int` is every CBOR
+// integer, not what fits a machine word.
+//
+// The map is walked on its encoded form because the CBOR library cannot be
+// asked what type a key or the map itself was. Decoding into a Go map
+// coerces: `simple(1)` arrives as the integer 1, and a self-described tag
+// (55799) around the map or around a key is stripped without a trace. A
+// payload carrying `{simple(1): "evil.example", 2: ...}` and no integer key 1
+// therefore decoded cleanly, with the operator taken from the simple value,
+// while a reader that honours `* int => any` rejects the same signed payload
+// outright. One token, two operator domains, depending on which
+// implementation read it. Reading the major type off the encoding leaves
+// nothing to coerce.
+//
+// Duplicates are compared by value, so a key spelled twice in encodings of
+// different widths is still a duplicate: two payloads in one signature
+// otherwise.
+func payloadKeys(b []byte) (map[int]cbor.RawMessage, error) {
+	entries, err := mapEntries(b)
+	if err != nil {
+		return nil, err
+	}
+	type intKey struct {
+		negative bool
+		n        uint64
+	}
+	seen := make(map[intKey]bool, len(entries))
+	raw := make(map[int]cbor.RawMessage, keyRole)
+	for _, e := range entries {
+		// Text and byte strings, tags (a bignum is one), simple values and
+		// floats are not `int`.
+		major, n, _, ok := cborHead(e.key)
+		if !ok || (major != majorUint && major != majorNint) {
 			return nil, ErrMalformed
+		}
+		id := intKey{negative: major == majorNint, n: n}
+		if seen[id] {
+			return nil, ErrMalformed
+		}
+		seen[id] = true
+		if major == majorUint && n >= keyOperator && n <= keyRole {
+			raw[int(n)] = e.value
 		}
 	}
 	return raw, nil
+}
+
+// mapEntry is one key and value of a CBOR map, each still encoded.
+type mapEntry struct{ key, value cbor.RawMessage }
+
+// mapEntries splits an encoded CBOR map into its entries, in wire order.
+// Untrusted input: anything but exactly one well-formed map is malformed,
+// and that includes a tagged map, which is not a map.
+func mapEntries(b []byte) ([]mapEntry, error) {
+	major, count, size, counted := cborHead(b)
+	if major != majorMap || (!counted && b[0] != 0xbf) {
+		return nil, ErrMalformed
+	}
+	rest := b[size:]
+	var entries []mapEntry
+	for i := uint64(0); !counted || i < count; i++ {
+		if !counted && len(rest) > 0 && rest[0] == 0xff {
+			rest = rest[1:]
+			break
+		}
+		var e mapEntry
+		var err error
+		if e.key, rest, err = nextItem(rest); err != nil {
+			return nil, err
+		}
+		if e.value, rest, err = nextItem(rest); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	if len(rest) != 0 {
+		return nil, ErrMalformed
+	}
+	return entries, nil
+}
+
+// headerMajors returns the CBOR major type of each value in a COSE header
+// bucket that sits under an unsigned integer label, and rejects a label that
+// is neither an integer nor a text string (RFC 9052 §3: `label = int / tstr`).
+//
+// go-cose has already decoded the bucket, but through a decoder that drops a
+// self-described tag (55799) wherever it meets one: `55799(4): kid` read as
+// the kid label, and `1: 55799(-8)` as alg -8. Those are a tag where the
+// protocol requires an int, a tstr or a bstr, and a verifier that keeps the
+// tag rejects the token this one passed. The bucket is untrusted input, so
+// the types are read here from the octets the signature covers.
+func headerMajors(bucket []byte) (map[uint64]byte, error) {
+	entries, err := mapEntries(bucket)
+	if err != nil {
+		return nil, err
+	}
+	majors := make(map[uint64]byte, len(entries))
+	for _, e := range entries {
+		major, n, _, ok := cborHead(e.key)
+		switch {
+		case major == majorUint && ok:
+			majors[n] = e.value[0] >> 5
+		case major == majorNint && ok, major == majorText:
+		default:
+			return nil, ErrMalformed
+		}
+	}
+	return majors, nil
+}
+
+// protectedBucket unwraps the protected header bucket: a byte string holding
+// the encoded header map, or an empty one for no headers at all.
+func protectedBucket(raw cbor.RawMessage) ([]byte, error) {
+	major, n, size, ok := cborHead(raw)
+	if major != majorBytes || !ok || uint64(len(raw)-size) != n {
+		return nil, ErrMalformed
+	}
+	return raw[size:], nil
 }
 
 // prefix wire form: 16-byte address followed by one prefix-length byte.
@@ -317,7 +439,8 @@ var (
 	// The CDDL types them tstr, bstr and uint; a tagged value is none of
 	// those, and a bignum is CDDL's biguint, a different type. Without this
 	// the decoder strips tags and folds a bignum into an integer, so Go
-	// would accept tokens the Rust verifier rejects.
+	// would accept tokens the Rust verifier rejects. decodePayload checks
+	// the major type first; this keeps a tag refused if that ever changes.
 	fieldDec cbor.DecMode
 )
 
@@ -327,12 +450,13 @@ func init() {
 		panic(err)
 	}
 	detEnc = m
-	// Reject duplicate map keys — two payloads in one signature otherwise.
-	// Non-deterministic-but-well-formed encodings (indefinite length,
-	// non-minimal ints, unsorted keys) are accepted: the signature binds the
-	// exact octets, so this is an interop nicety, not a security check, and
-	// the reference implementations stay lenient together (see -01 §Token).
-	d, err := cbor.DecOptions{DupMapKey: cbor.DupMapKeyEnforcedAPF}.DecMode()
+	// detDec only delimits the items of the payload map; payloadKeys owns
+	// the key rules, duplicates included. Non-deterministic-but-well-formed
+	// encodings (indefinite length, non-minimal ints, unsorted keys) are
+	// accepted: the signature binds the exact octets, so this is an interop
+	// nicety, not a security check, and the reference implementations stay
+	// lenient together (see -01 §Token).
+	d, err := cbor.DecOptions{}.DecMode()
 	if err != nil {
 		panic(err)
 	}
@@ -369,6 +493,24 @@ func encodePayload(p Payload) ([]byte, error) {
 	})
 }
 
+// decodeField decodes the value of a defined payload key, which must be of
+// the CBOR major type its CDDL type names. Untrusted input, and the decoder
+// alone is too obliging to hold it to that: null and undefined leave dst at
+// its zero value without an error, so `3: null` read as the default unit and
+// `4: null` as iat 0; simple(n) reads as the integer n; an array of small
+// integers reads as a byte string. Each is a signed token this verifier
+// accepted and a stricter one calls malformed. A negative iat or exp is
+// major type 1, so it is refused here too.
+func decodeField(rm cbor.RawMessage, major byte, dst any) error {
+	if len(rm) == 0 || rm[0]>>5 != major {
+		return ErrMalformed
+	}
+	if err := fieldDec.Unmarshal(rm, dst); err != nil {
+		return ErrMalformed
+	}
+	return nil
+}
+
 func decodePayload(b []byte) (Payload, error) {
 	raw, err := payloadKeys(b)
 	if err != nil {
@@ -382,21 +524,20 @@ func decodePayload(b []byte) (Payload, error) {
 	)
 	// REQUIRED keys.
 	required := []struct {
-		key int
-		dst any
+		key   int
+		major byte
+		dst   any
 	}{
-		{keyOperator, &p.Operator}, {keyPrefix, &pfx},
-		{keyIssuedAt, &iat}, {keyExpires, &exp}, {keyRole, &p.Role},
+		{keyOperator, majorText, &p.Operator}, {keyPrefix, majorBytes, &pfx},
+		{keyIssuedAt, majorUint, &iat}, {keyExpires, majorUint, &exp}, {keyRole, majorText, &p.Role},
 	}
 	for _, f := range required {
 		rm, ok := raw[f.key]
 		if !ok {
 			return Payload{}, ErrMalformed
 		}
-		// Untrusted input: a wrong type, a tag, or a negative iat/exp
-		// (decoded into uint64) is malformed.
-		if err := fieldDec.Unmarshal(rm, f.dst); err != nil {
-			return Payload{}, ErrMalformed
+		if err := decodeField(rm, f.major, f.dst); err != nil {
+			return Payload{}, err
 		}
 	}
 	if !ValidDomain(p.Operator) {
@@ -406,8 +547,8 @@ func decodePayload(b []byte) (Payload, error) {
 	// OPTIONAL unit; absent means default.
 	p.Unit = DefaultUnitPrefixLen
 	if rm, ok := raw[keyUnit]; ok {
-		if err := fieldDec.Unmarshal(rm, &p.Unit); err != nil {
-			return Payload{}, ErrMalformed
+		if err := decodeField(rm, majorUint, &p.Unit); err != nil {
+			return Payload{}, err
 		}
 	}
 	if !validRoles[p.Role] {
@@ -483,6 +624,34 @@ func Sign(p Payload, selector string, priv ed25519.PrivateKey) ([]byte, error) {
 // type and kid present in the protected bucket, no header confusion with the
 // unprotected bucket, and no crit header. Returns the selector from kid.
 func protectedHeaders(msg *cose.Sign1Message) (string, error) {
+	// Types first, from the encoding: see headerMajors.
+	var majors map[uint64]byte
+	bucket, err := protectedBucket(msg.Headers.RawProtected)
+	if err != nil {
+		return "", err
+	}
+	if len(bucket) > 0 {
+		if majors, err = headerMajors(bucket); err != nil {
+			return "", err
+		}
+	}
+	if _, err := headerMajors(msg.Headers.RawUnprotected); err != nil {
+		return "", err
+	}
+	// Each wrong type is reported as the fault the value would otherwise be.
+	for _, want := range []struct {
+		label  uint64
+		majors [2]byte
+		err    error
+	}{
+		{1, [2]byte{majorUint, majorNint}, ErrHeaderConfusion},
+		{3, [2]byte{majorText, majorText}, ErrContentType},
+		{4, [2]byte{majorBytes, majorBytes}, ErrNoSelector},
+	} {
+		if m, ok := majors[want.label]; ok && m != want.majors[0] && m != want.majors[1] {
+			return "", want.err
+		}
+	}
 	// crit forbidden.
 	if _, ok := msg.Headers.Protected[cose.HeaderLabelCritical]; ok {
 		return "", ErrHeaderConfusion

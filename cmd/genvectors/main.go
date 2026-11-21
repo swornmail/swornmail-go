@@ -292,6 +292,39 @@ func signRaw(entries ...kv) []byte {
 	return signWith(buildMap(entries...), goodProt(), nil)
 }
 
+// envelope assembles a tagged COSE_Sign1 around an already-encoded protected
+// header map, signing as go-cose would. It exists for the header shapes
+// go-cose refuses to emit: a tagged label, a tagged value.
+func envelope(prot, payload []byte) []byte {
+	enc := func(v any) []byte {
+		b, err := detEnc.Marshal(v)
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}
+	sig := ed25519.Sign(priv, enc([]any{"Signature1", prot, []byte{}, payload}))
+	out := []byte{0xd2, 0x84}
+	for _, item := range [][]byte{enc(prot), {0xa0}, enc(payload), enc(sig)} {
+		out = append(out, item...)
+	}
+	return out
+}
+
+// with returns the valid payload entries with the value of one key replaced.
+func with(key int, v any) []kv {
+	entries := goodEntries()
+	entries[key-1].v = v
+	return entries
+}
+
+// keyed returns the valid payload entries with one key itself replaced.
+func keyed(key int, k any) []kv {
+	entries := goodEntries()
+	entries[key-1].k = k
+	return entries
+}
+
 func main() {
 	out := flag.String("o", "test-vectors-v1.json", "output path")
 	flag.Parse()
@@ -653,6 +686,62 @@ func main() {
 			token: signRaw(kv{1, "mailer.example.com"}, kv{2, prefixWire("2001:db8:f00::", 48)},
 				kv{3, uint64(64)}, kv{4, uint64(1<<63 - 1800)}, kv{5, uint64(1<<63 + 1800)}, kv{6, "mta"}),
 			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "not_yet_valid"},
+
+		// --- payload and header major types (appended) ---
+		//
+		// §token CDDL: the payload is a map, unit and iat are uint, prefix is
+		// bstr. null, a simple value and an array of integers are none of
+		// those, whatever a lenient decoder makes of them; a tagged map is a
+		// tag, not a map.
+		{name: "unit_null", section: "token", token: signRaw(with(3, cbor.RawMessage{0xf6})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "unit_simple_value", section: "token", token: signRaw(with(3, cbor.RawMessage{0xf8, 64})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "iat_null", section: "token", token: signRaw(with(4, cbor.RawMessage{0xf6})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "prefix_integer_array", section: "token",
+			token:  signRaw(with(2, []uint64{0x20, 0x01, 0x0d, 0xb8, 0x0f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 48})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "payload_self_described", section: "token",
+			token:  signWith(append([]byte{0xd9, 0xd9, 0xf7}, buildMap(goodEntries()...)...), goodProt(), nil),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		// §token CDDL `* int => any`: a key is an integer. A tagged integer
+		// and a bignum are not `int`, so neither can stand in for key 1 —
+		// while every CBOR integer is, however wide, and is ignored when it
+		// names no defined key.
+		{name: "operator_key_self_described", section: "token",
+			token:  signRaw(keyed(1, cbor.Tag{Number: 55799, Content: uint64(1)})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "operator_key_bignum", section: "token",
+			token:  signRaw(keyed(1, cbor.Tag{Number: 2, Content: []byte{1}})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "malformed"},
+		{name: "unknown_key_beyond_int64_ignored", section: "token",
+			token:  signRaw(append(goodEntries(), kv{uint64(1 << 63), "future"})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "pass",
+			operator: "mailer.example.com", unit: "2001:db8:f00:1234::/64"},
+		{name: "unknown_key_most_negative_ignored", section: "token",
+			token:  signRaw(append(goodEntries(), kv{cbor.RawMessage{0x3b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, "future"})...),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expect: "pass",
+			operator: "mailer.example.com", unit: "2001:db8:f00:1234::/64"},
+		// RFC 9052 §3: a header label is `int / tstr`, and §token requires
+		// alg, content type and kid in the protected bucket as an int, a tstr
+		// and a bstr. A bignum label is not label 4, and a tagged kid is not
+		// a bstr. Each token has more than one fault a verifier may name
+		// first (the label and the absent kid; the kid's type and its
+		// syntax), and the draft leaves reason order advisory, so each
+		// carries the set. None of them is a pass.
+		{name: "kid_label_bignum", section: "token",
+			token: envelope(buildMap(kv{1, int64(-8)}, kv{3, sworn.ContentType},
+				kv{cbor.Tag{Number: 2, Content: []byte{4}}, []byte(selector)}), buildMap(goodEntries()...)),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expectAny: []string{"malformed", "bad_kid"}},
+		{name: "kid_self_described", section: "token",
+			token: envelope(buildMap(kv{1, int64(-8)}, kv{3, sworn.ContentType},
+				kv{4, cbor.Tag{Number: 55799, Content: []byte(selector)}}), buildMap(goodEntries()...)),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expectAny: []string{"bad_kid", "malformed"}},
+		{name: "alg_negative_bignum", section: "token",
+			token: envelope(buildMap(kv{1, cbor.Tag{Number: 3, Content: []byte{7}}}, kv{3, sworn.ContentType},
+				kv{4, []byte(selector)}), buildMap(goodEntries()...)),
+			source: "2001:db8:f00:1234::a:1", now: t0 + 1800, expectAny: []string{"header_confusion", "malformed"}},
 	}
 
 	// Self-check against the reference implementation; authored expectations
