@@ -322,3 +322,42 @@ func TestOfflineKeyIsHeldToTheRecordRule(t *testing.T) {
 		}
 	}
 }
+
+// Without --force the key is written beside its destination and then given
+// the name with link(2), which cannot replace anything. Creating the file
+// under its real name first, and removing it when the write failed, could
+// remove a key that another run had put in place in the meantime.
+func TestUnforcedWriteNeverTouchesAnExistingKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "2026a.key")
+	_, first, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateKey(path, first, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, second, _ := ed25519.GenerateKey(nil)
+	if err := writePrivateKey(path, second, false); err == nil {
+		t.Fatal("second unforced write succeeded over an existing key")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("existing key changed or vanished: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("temporary files left behind: %d entries in the directory", len(entries))
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != keyFilePerm {
+		t.Fatalf("mode = %v, want %o", info.Mode().Perm(), keyFilePerm)
+	}
+}

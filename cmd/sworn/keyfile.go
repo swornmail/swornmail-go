@@ -39,34 +39,30 @@ func writePrivateKey(path string, priv ed25519.PrivateKey, force bool) error {
 		return err
 	}
 	block := &pem.Block{Type: pemTypePrivate, Bytes: der}
-	if !force {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, keyFilePerm)
-		if err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				return fmt.Errorf("%s already exists; refusing to overwrite a signing key (pass --force to replace it)", path)
-			}
-			return err
-		}
-		if err := writeKeyFile(f, block); err != nil {
-			// O_EXCL means this run created the file, so a truncated key
-			// is ours to take away again.
-			_ = os.Remove(path)
-			return err
-		}
-		return nil
-	}
+	// Both paths write the whole key to a temporary file first and only
+	// then give it the destination's name, so nothing this run does to a
+	// half-written file can touch a key that is already in place.
 	// os.CreateTemp opens with O_EXCL and mode 0600, in the destination's
-	// own directory so the rename never crosses a filesystem.
+	// own directory so neither step below crosses a filesystem.
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tmp.Name())
 	if err := writeKeyFile(tmp, block); err != nil {
-		_ = os.Remove(tmp.Name())
 		return err
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		_ = os.Remove(tmp.Name())
+	if force {
+		return os.Rename(tmp.Name(), path)
+	}
+	// link(2) fails if the name exists, so this never replaces a key. It
+	// also means there is no failed write to clean up under the real name:
+	// creating the file there first and removing it on failure could remove
+	// a key that another run had put in place in the meantime.
+	if err := os.Link(tmp.Name(), path); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%s already exists; refusing to overwrite a signing key (pass --force to replace it)", path)
+		}
 		return err
 	}
 	return nil
