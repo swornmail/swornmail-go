@@ -106,6 +106,15 @@ go run ./cmd/sworn discover --ip <addr>
 go run ./cmd/sworn-milter --authserv-id mx.example.com  # listens on tcp:127.0.0.1:10025
 ```
 
+`verify --key` and `genrecord --key` hold a base64 key to the rule a published
+`pk=` value is held to: padded, canonical base64 of a 32-octet Ed25519 point.
+A key that would be refused in the key record is refused here too. `sworn
+record` checks the domain and selector against the protocol's syntax before
+it queries anything, and exits 2 on a name that could not be one.
+`sworn keygen --force` replaces the key file in one step: the old key
+survives a failed write, and a symbolic link at that path is replaced, not
+followed.
+
 ### Running the milter under Postfix
 
 The full walkthrough is at [swornmail.dev/milter](https://swornmail.dev/milter/).
@@ -137,7 +146,11 @@ smtpd_milters = { inet:127.0.0.1:10025, default_action=accept }
   but a chrooted smtpd reads an absolute socket path inside the queue
   directory, so `unix:/var/spool/postfix/sworn.sock` would point at the wrong
   place, and with `default_action=accept` Postfix would just log a warning and
-  skip the milter.
+  skip the milter. At startup the milter removes a socket left at that path
+  by an instance that is no longer running, and nothing else: if the path
+  holds a file that is not a socket, or a socket something still answers on,
+  it refuses to start and says which. On shutdown it removes only the socket
+  it created.
 - **Run it on the border MTA**, the one that accepts connections from the
   Internet. It evaluates the connecting address and deletes inbound
   `Authentication-Results` fields that claim its authserv-id, so it must sit
@@ -156,10 +169,22 @@ smtpd_milters = { inet:127.0.0.1:10025, default_action=accept }
   stops the milter at startup. `sworn verify` and `sworn discover` take the
   same flag.
 - **`--authserv-id`** defaults to the hostname. Set it to the authserv-id your
-  downstream filters trust; inbound results claiming that id are removed. The
+  downstream filters trust; inbound results claiming that id are removed. It
+  must be a plain token such as a hostname (no spaces, `;`, parentheses or
+  other RFC 2045 specials); the milter refuses to start with an empty or
+  unusable one, because it could then neither stamp a well-formed field nor
+  recognise a forged one. The
   match is deliberately loose (case, a trailing dot, odd whitespace,
   comments), and any field containing a MIME encoded-word is removed outright,
   so oddly spelled forgeries go too.
+- **Discovery runs once per connection**, at its first message, and the
+  outcome is stamped on every message that connection carries. A `temperror`
+  is the exception: it is not kept, and the next message tries again, so a
+  DNS failure never outlasts itself.
+- **DNS goes through Go's own resolver**, querying the nameservers in
+  `/etc/resolv.conf` directly, not through the system's `getaddrinfo`.
+  Telling "no such record" (`none`) from a failed lookup (`temperror`) then
+  does not depend on the host's libc, its NSS modules or a caching daemon.
 - **Removing forged results fails open too.** While the milter is down, mail is
   accepted without our result *and* without inbound `Authentication-Results`
   fields claiming your id being removed. A downstream filter that trusts that

@@ -280,3 +280,102 @@ func TestParsePrefixesSplitsCommas(t *testing.T) {
 		t.Error("nonsense prefix accepted")
 	}
 }
+
+// longDomain is a valid operator domain of exactly n octets.
+func longDomain(t *testing.T, n int) string {
+	t.Helper()
+	var labels []string
+	for left := n; left > 0; {
+		size := min(left, 63)
+		if left-size == 1 { // never leave room for a dot and nothing after it
+			size--
+		}
+		labels = append(labels, strings.Repeat("a", size))
+		left -= size + 1
+	}
+	d := strings.Join(labels, ".")
+	if len(d) != n || !sworn.ValidDomain(d) {
+		t.Fatalf("test bug: built a %d-octet domain, valid=%t, want %d", len(d), sworn.ValidDomain(d), n)
+	}
+	return d
+}
+
+// The operator domain is valid up to 253 octets, but the records are published
+// below it. A name over 253 octets cannot exist in the DNS, so generating one
+// and reporting success sends the operator away with records they can never
+// publish.
+func TestBuildRecordsChecksOwnerNameLength(t *testing.T) {
+	pub := testKey(t)
+	const policyLabels = len("_prefixes._sworn.")
+	cases := []struct {
+		name      string
+		domainLen int
+		selector  string
+		wantErr   string // substring; empty means accepted
+	}{
+		{"policy name exactly 253", maxNameLen - policyLabels, "a", ""},
+		{"policy name 254", maxNameLen - policyLabels + 1, "a", "policy record's name would be 254 octets"},
+		{"longest valid domain", 253, "a", "key record's name would be 262 octets"},
+		// 63 + "._sworn." is longer than "_prefixes._sworn.", so here the
+		// key name is the one that no longer fits.
+		{"key name exactly 253", maxNameLen - 63 - len("._sworn."), strings.Repeat("s", 63), ""},
+		{"key name 254", maxNameLen - 63 - len("._sworn.") + 1, strings.Repeat("s", 63), "key record's name would be 254 octets"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := baseOptions(pub)
+			o.Domain, o.Selector = longDomain(t, c.domainLen), c.selector
+			rs, err := buildRecords(o)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("buildRecords: %v", err)
+				}
+				for _, rec := range append([]dnsRecord{rs.Key, rs.Policy}, rs.Pointers...) {
+					if len(rec.QName) > maxNameLen {
+						t.Errorf("emitted a %d-octet name: %s", len(rec.QName), rec.QName)
+					}
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("buildRecords = %v, want an error containing %q", err, c.wantErr)
+			}
+			if !strings.Contains(err.Error(), "at most 253") || !strings.Contains(err.Error(), "shorter --domain or --selector") {
+				t.Errorf("the error does not tell the operator what to change: %v", err)
+			}
+		})
+	}
+}
+
+// The rua note is about the mailbox being in another domain. DNS names compare
+// case-insensitively, so spelling alone must not produce it.
+func TestRuaNoteComparesDomainsCaseInsensitively(t *testing.T) {
+	pub := testKey(t)
+	const outside = "the rua mailbox is outside"
+	cases := []struct {
+		name, domain, rua string
+		wantNote          bool
+	}{
+		{"same domain, same case", "mailer.example.com", "mailto:r@mailer.example.com", false},
+		{"same domain, rua upper case", "mailer.example.com", "mailto:r@MAILER.Example.COM", false},
+		{"same domain, --domain upper case", "Mailer.Example.COM", "mailto:r@mailer.example.com", false},
+		{"subdomain, mixed case", "mailer.example.com", "mailto:r@Reports.MAILER.example.com", false},
+		{"another domain", "mailer.example.com", "mailto:r@reports.example.net", true},
+		{"another domain, mixed case", "mailer.example.com", "mailto:r@Reports.Example.NET", true},
+		// A suffix of the string but not a subdomain.
+		{"lookalike suffix", "mailer.example.com", "mailto:r@evilMAILER.example.com", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := baseOptions(pub)
+			o.Domain, o.RUA = c.domain, c.rua
+			rs, err := buildRecords(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(strings.Join(rs.Notes, "\n"), outside); got != c.wantNote {
+				t.Errorf("outside-the-domain note present = %t, want %t\n%s", got, c.wantNote, strings.Join(rs.Notes, "\n"))
+			}
+		})
+	}
+}
