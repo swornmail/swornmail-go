@@ -63,7 +63,11 @@ func writePrivateKey(path string, priv ed25519.PrivateKey, force bool) error {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%s already exists; refusing to overwrite a signing key (pass --force to replace it)", path)
 		}
-		return err
+		// Some filesystems have no hard links (FAT and exFAT, as on a
+		// removable drive kept for an offline key). Nothing is written
+		// under the real name there: falling back to create-then-remove
+		// would bring the race back.
+		return fmt.Errorf("%w; this directory may not support hard links, which keygen needs to place a key without replacing one (pass --force to rename it into place instead)", err)
 	}
 	return nil
 }

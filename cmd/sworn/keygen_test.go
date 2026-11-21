@@ -323,6 +323,37 @@ func TestOfflineKeyIsHeldToTheRecordRule(t *testing.T) {
 	}
 }
 
+// Two runs race: this one is part-way through writing when another puts a
+// finished key at the path, and then this one's write fails. Cleaning up
+// under the real name would delete the other run's key.
+func TestFailedUnforcedWriteLeavesAKeyThatAppearedMeanwhile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "2026a.key")
+	diskFull := errors.New("no space left on device")
+	encodeKeyPEM = func(w io.Writer, _ *pem.Block) error {
+		_, _ = w.Write([]byte("-----BEGIN PRIV"))
+		if err := os.WriteFile(path, []byte("the other run's key"), keyFilePerm); err != nil {
+			t.Fatal(err)
+		}
+		return diskFull
+	}
+	t.Cleanup(func() { encodeKeyPEM = pem.Encode })
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateKey(path, priv, false); !errors.Is(err, diskFull) {
+		t.Fatalf("writePrivateKey = %v, want the write error", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "the other run's key" {
+		t.Errorf("the other run's key is gone or changed: %q, %v", got, err)
+	}
+	if extra := leftovers(t, dir, "2026a.key"); len(extra) != 0 {
+		t.Errorf("a failed write left files behind: %v", extra)
+	}
+}
+
 // Without --force the key is written beside its destination and then given
 // the name with link(2), which cannot replace anything. Creating the file
 // under its real name first, and removing it when the write failed, could

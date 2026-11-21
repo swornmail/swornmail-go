@@ -180,7 +180,7 @@ smtpd_milters = { inet:127.0.0.1:10025, default_action=accept }
 - **Discovery runs once per connection**, at its first message, and the
   outcome is stamped on every message that connection carries, for up to
   five minutes; a connection held open longer is looked up again, so a
-  withdrawn attestation does not outlive the connection that saw it. A
+  withdrawn attestation is stamped for at most five minutes more. A
   `temperror` is never kept: the next message tries again, so a DNS failure
   never outlasts itself.
 - **DNS goes through Go's own resolver**, querying the nameservers in
