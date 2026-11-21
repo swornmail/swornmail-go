@@ -156,6 +156,15 @@ func ParseRecord(txt string) (Record, error) {
 		return Record{}, err
 	}
 	var rec Record
+	// pk is held back until every tag has been read. Its meaning depends on
+	// k, and tags may come in any order: validating it as an Ed25519 key on
+	// sight made `pk=<a future algorithm's key>; k=future` a malformed
+	// record (permerror) while `k=future; pk=...` was an unimplemented
+	// algorithm (none). The draft requires none for an unimplemented k, so
+	// that publishing a future-algorithm selector never penalizes an
+	// operator with older verifiers, and the Rust verifier reads k first.
+	var pk string
+	var havePK bool
 	for _, kv := range pairs {
 		k, v := kv[0], kv[1]
 		switch k {
@@ -173,24 +182,27 @@ func ParseRecord(txt string) (Record, error) {
 			}
 			rec.Algorithm = v
 		case "pk":
-			// Strict: the unused bits of the last character must be zero
-			// (RFC 4648 3.5). The lenient decoder drops them, so one key had
-			// many spellings that Go accepted and Rust rejected.
-			raw, err := base64.StdEncoding.Strict().DecodeString(v)
-			if err != nil || len(raw) != ed25519.PublicKeySize {
-				return Record{}, ErrRecordKey
-			}
-			// pk is untrusted DNS input. 32 bytes that aren't a curve point
-			// make the record malformed (permerror, which is never worse than
-			// no attestation), so the operator sees the mistake. Treating them
-			// as a key and failing every signature would hide it, and the
-			// Rust verifier already rejects such a record here. Non-canonical
-			// encodings of real points still decode, as they do in Rust.
-			if _, err := new(edwards25519.Point).SetBytes(raw); err != nil {
-				return Record{}, ErrRecordKey
-			}
-			rec.PublicKey = ed25519.PublicKey(raw)
+			pk, havePK = v, true
 		}
+	}
+	if havePK && rec.Algorithm != "" {
+		// Strict: the unused bits of the last character must be zero
+		// (RFC 4648 3.5). The lenient decoder drops them, so one key had
+		// many spellings that Go accepted and Rust rejected.
+		raw, err := base64.StdEncoding.Strict().DecodeString(pk)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			return Record{}, ErrRecordKey
+		}
+		// pk is untrusted DNS input. 32 bytes that aren't a curve point
+		// make the record malformed (permerror, which is never worse than
+		// no attestation), so the operator sees the mistake. Treating them
+		// as a key and failing every signature would hide it, and the
+		// Rust verifier already rejects such a record here. Non-canonical
+		// encodings of real points still decode, as they do in Rust.
+		if _, err := new(edwards25519.Point).SetBytes(raw); err != nil {
+			return Record{}, ErrRecordKey
+		}
+		rec.PublicKey = ed25519.PublicKey(raw)
 	}
 	if rec.Version == "" || rec.Algorithm == "" || rec.PublicKey == nil {
 		return Record{}, ErrRecordSyntax
