@@ -141,3 +141,27 @@ func TestVerifyOfflineKeyStillRequiresPolicy(t *testing.T) {
 		t.Fatalf("policy query not issued exactly once: %v", r.queries)
 	}
 }
+
+// A --key that a receiver would refuse as a pk= value is a usage error, not a
+// key to verify with. Accepted leniently, `sworn verify --key` reported pass
+// for a spelling that fails as key_record_invalid once it is published.
+func TestVerifyOfflineKeyMustBeAPublishableKey(t *testing.T) {
+	token, pub, _ := verificationFixture(t)
+	policy := "v=SWORN1; p=2001:db8:f00::/48; u=64"
+	good := base64.StdEncoding.EncodeToString(pub)
+	run := func(key string) int {
+		return cmdVerify([]string{token, "--ip", "2001:db8:f00:1234::1", "--policy", policy, "--key", key, "--now", "1786291260"})
+	}
+	if code := run(good); code != 0 {
+		t.Fatalf("canonical key: exit = %d, want pass", code)
+	}
+	for name, key := range map[string]string{
+		"unpadded":          strings.TrimSuffix(good, "="),
+		"not a curve point": "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		"trailing tag":      good + "; x=y",
+	} {
+		if code := run(key); code != 2 {
+			t.Errorf("%s: exit = %d, want usage error", name, code)
+		}
+	}
+}

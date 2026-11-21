@@ -45,6 +45,19 @@ func main() {
 	}
 
 	policies, eligibility := generate()
+	// Verdicts come back keyed by name alone, so a name must be unique across
+	// both kinds of case: two cases under one name would be compared as one,
+	// and the other would pass unexamined.
+	names := make([]string, 0, len(policies)+len(eligibility))
+	for _, c := range policies {
+		names = append(names, c.name)
+	}
+	for name := range eligibility {
+		names = append(names, name)
+	}
+	if dups := repeated(names); len(dups) > 0 {
+		fatal("corpus has duplicate case names: " + strings.Join(dups, ", "))
+	}
 
 	ourPolicy := make(map[string]string, len(policies))
 	for _, c := range policies {
@@ -74,13 +87,26 @@ func main() {
 	}
 
 	theirs := map[string]string{}
+	var answered []string
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		name, verdict, ok := strings.Cut(sc.Text(), "\t")
 		if ok {
 			theirs[name] = verdict
+			answered = append(answered, name)
 		}
+	}
+	// The arm's output is evidence, and a run that lost part of it has
+	// compared nothing for the part it lost. A missing verdict is reported
+	// per case below; a read error or a second verdict for one name is not
+	// something the comparison can see, so it ends the run here.
+	if err := sc.Err(); err != nil {
+		fatal("reading the arm's output: " + err.Error())
+	}
+	if dups := repeated(answered); len(dups) > 0 {
+		sort.Strings(dups)
+		fatal("arm returned more than one verdict for: " + strings.Join(dups, ", "))
 	}
 
 	var divergences []string
@@ -118,11 +144,33 @@ func main() {
 		fmt.Println("  DIVERGENCE", d)
 	}
 	if *reportPath != "" {
-		writeReport(*reportPath, summary, divergences)
+		// A report that was asked for and not written is a failed run: the
+		// caller is about to read a stale file, or none, as this result.
+		if err := writeReport(*reportPath, summary, divergences); err != nil {
+			fatal("writing report: " + err.Error())
+		}
 	}
 	if len(divergences) > 0 {
 		os.Exit(1)
 	}
+}
+
+// fatal ends a run that cannot vouch for its own comparison.
+func fatal(msg string) {
+	fmt.Fprintln(os.Stderr, "recorddiff:", msg)
+	os.Exit(1)
+}
+
+// repeated returns each name that occurs more than once, in first-seen order.
+func repeated(names []string) []string {
+	count := make(map[string]int, len(names))
+	var dups []string
+	for _, n := range names {
+		if count[n]++; count[n] == 2 {
+			dups = append(dups, n)
+		}
+	}
+	return dups
 }
 
 // evalPolicy is the reference answer: parse the record, then find the longest
@@ -163,7 +211,7 @@ func evalEligibility(source string) string {
 	return "no"
 }
 
-func writeReport(path, summary string, divergences []string) {
+func writeReport(path, summary string, divergences []string) error {
 	var b strings.Builder
 	b.WriteString("# Record and prefix differential — Go vs external arm\n\n")
 	b.WriteString(summary + "\n\n")
@@ -175,7 +223,5 @@ func writeReport(path, summary string, divergences []string) {
 			b.WriteString("- " + d + "\n")
 		}
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, "recorddiff: writing report:", err)
-	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
 }

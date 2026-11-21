@@ -1,7 +1,8 @@
 name: CI
 
 # Builds, vets and tests every package on each push to main and each pull
-# request. Until this existed only the public-boundary check ran here, so a
+# request, and holds the result to the published vectors and to the Rust
+# verifier. Until this existed only the public-boundary check ran here, so a
 # source file that never reached a commit left cmd/sworn-milter unbuildable
 # on main with nothing failing.
 on:
@@ -22,6 +23,17 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Format
+        # gofmt -l exits 0 whatever it finds, so the listing itself is the
+        # failure.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Build
         run: go build ./...
 
@@ -30,6 +42,70 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+  freeze-gate:
+    # The -01 wire format is frozen: the vectors this implementation
+    # generates must be byte-identical to the ones the specification
+    # publishes. Run by hand it was easy to skip; a change to which tokens or
+    # records are accepted, or to the reason given, now fails here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: swornmail-go
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: swornmail/spec
+          path: swornmail-spec
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: swornmail-go/go.mod
+          cache-dependency-path: swornmail-go/go.sum
+
+      - name: Generate vectors
+        working-directory: swornmail-go
+        run: go run ./cmd/genvectors -o "$RUNNER_TEMP/v1.json"
+
+      - name: Compare with the published vectors
+        run: cmp "$RUNNER_TEMP/v1.json" swornmail-spec/test-vectors/v1.json
+
+  difftest:
+    # Go against the independent Rust verifier over the adversarial token
+    # corpus. Any disagreement on the result, or on operator and unit for a
+    # pass, fails the job. Both repositories are checked out side by side
+    # and the Rust binary is passed by absolute path, so nothing depends on
+    # where the runner puts them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: swornmail-go
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: swornmail/swornmail
+          path: swornmail
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: swornmail-go/go.mod
+          cache-dependency-path: swornmail-go/go.sum
+
+      - name: Build the Rust differential binary
+        working-directory: swornmail
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo +stable build --bin difftest
+
+      - name: Go against Rust
+        working-directory: swornmail-go
+        run: go run ./cmd/difftest --rust "$GITHUB_WORKSPACE/swornmail/target/debug/difftest"
 
   postfix:
     # The milter in front of a real Postfix (Debian's, smtpd chrooted),

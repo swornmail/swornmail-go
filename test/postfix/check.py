@@ -24,10 +24,17 @@ EXPECTED = {
 }
 
 delivered = {}
-for msg in mailbox.mbox("/var/mail/rcpt"):
-    delivered[msg["Subject"]] = [" ".join(v.split()) for v in msg.get_all("Authentication-Results", [])]
-
 fails = 0
+for msg in mailbox.mbox("/var/mail/rcpt"):
+    subject = msg["Subject"]
+    if subject in delivered:
+        # Each scenario message is sent once. Keeping only the last copy would
+        # let a duplicate with the right header hide one with the wrong one.
+        print(f"FAIL {subject}: delivered more than once")
+        fails += 1
+        continue
+    delivered[subject] = [" ".join(v.split()) for v in msg.get_all("Authentication-Results", [])]
+
 for subject, want in EXPECTED.items():
     got = delivered.pop(subject, None)
     if got == want:

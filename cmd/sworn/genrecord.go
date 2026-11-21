@@ -163,12 +163,23 @@ func buildRecords(o genOptions) (recordSet, error) {
 			Value: policyValue(o),
 		},
 	}
+	if err := checkOwnerName("key", rs.Key.QName); err != nil {
+		return recordSet{}, err
+	}
+	if err := checkOwnerName("policy", rs.Policy.QName); err != nil {
+		return recordSet{}, err
+	}
 	if err := roundTrip(rs, o); err != nil {
 		return recordSet{}, err
 	}
 	pointers, err := pointerRecords(o)
 	if err != nil {
 		return recordSet{}, err
+	}
+	for _, p := range pointers {
+		if err := checkOwnerName("pointer", p.QName); err != nil {
+			return recordSet{}, err
+		}
 	}
 	rs.Pointers = pointers
 	rs.Notes = notes(o, shortest, len(rs.Policy.Value))
@@ -257,6 +268,25 @@ func validateRUA(rua string) error {
 	mailbox, domain, ok := strings.Cut(addr, "@")
 	if !ok || mailbox == "" || !sworn.ValidDomain(domain) {
 		return fmt.Errorf("invalid --rua %q: expected mailto:<mailbox>@<domain>", rua)
+	}
+	return nil
+}
+
+// maxNameLen is the longest DNS name in presentation form without the
+// trailing dot: 253 octets, which is the 255-octet wire limit of RFC 1035
+// §2.3.4 less the first length octet and the root label.
+const maxNameLen = 253
+
+// checkOwnerName refuses a record whose owner name cannot exist in the DNS.
+// The operator domain is valid on its own up to 253 octets, but the records
+// live below it, at <selector>._sworn.<domain> and _prefixes._sworn.<domain>,
+// and those labels count against the same limit. Without this the command
+// reported success for records no zone can hold, and the operator found out
+// from their DNS provider, or not at all.
+func checkOwnerName(kind, qname string) error {
+	if len(qname) > maxNameLen {
+		return fmt.Errorf("the %s record's name would be %d octets, and a DNS name holds at most %d: "+
+			"use a shorter --domain or --selector", kind, len(qname), maxNameLen)
 	}
 	return nil
 }

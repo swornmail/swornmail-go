@@ -583,10 +583,20 @@ func Sign(p Payload, selector string, priv ed25519.PrivateKey) ([]byte, error) {
 		return nil, ErrNoSelector
 	}
 	selector = strings.ToLower(selector)
-	if !p.Expires.After(p.IssuedAt) {
+	// The bounds are checked on the whole seconds encodePayload writes, not on
+	// the time.Time values: those carry sub-second precision the wire drops.
+	// A 500 ms lifetime is positive as a duration and exp == iat once
+	// truncated, and an IssuedAt before 1970 serialises as a negative integer
+	// where the CDDL wants a uint. Either would be signed here and refused by
+	// every verifier, this one included.
+	iat, exp := p.IssuedAt.Unix(), p.Expires.Unix()
+	if iat < 0 {
+		return nil, ErrMalformed
+	}
+	if exp <= iat {
 		return nil, ErrBadValidity
 	}
-	if p.Expires.Sub(p.IssuedAt) > MaxTokenLifetime {
+	if exp-iat > int64(MaxTokenLifetime/time.Second) {
 		return nil, ErrLifetimeTooLong
 	}
 	if !validRoles[p.Role] {
