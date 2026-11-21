@@ -26,8 +26,11 @@ type swornMilter struct {
 	source     netip.Addr
 	haveSource bool
 	// outcome is the connection's Authentication-Results value once discovery
-	// has settled on one; empty until then. See evaluate.
+	// has settled on one; empty until then. settled is when. See evaluate.
 	outcome string
+	settled time.Time
+	// now is the clock; nil means time.Now. Tests replace it.
+	now func() time.Time
 	// stripIdx holds the per-name (1-based) positions of inbound
 	// Authentication-Results fields that claim our authserv-id and must be
 	// removed at the trust boundary (RFC 8601 §5). Both are per message and
@@ -104,17 +107,32 @@ func (s *swornMilter) Body(m *milter.Modifier) (milter.Response, error) {
 // become a lasting verdict: pinned, one dropped query would stand in for the
 // operator's attestation on every later message of a long-lived connection.
 // The next message tries again.
+//
+// A settled outcome is kept for outcomeMaxAge and no longer. An operator
+// can withdraw a prefix or switch to testing while a connection stays open,
+// and a kept pass would outlive that for as long as the sender held the
+// connection; a kept none would likewise hide an attestation published
+// since. The bound is short next to the time DNS changes take to be seen
+// anyway, and long next to a burst of messages.
 func (s *swornMilter) evaluate() string {
-	if s.outcome != "" {
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	if s.outcome != "" && now().Sub(s.settled) < outcomeMaxAge {
 		return s.outcome
 	}
+	s.outcome = ""
 	res, err := s.discover()
 	value := discover.AuthResults(s.authservID, res, err)
 	if !errors.Is(err, discover.ErrTemp) {
-		s.outcome = value
+		s.outcome, s.settled = value, now()
 	}
 	return value
 }
+
+// outcomeMaxAge is how long one connection reuses a discovery outcome.
+const outcomeMaxAge = 5 * time.Minute
 
 // discover runs discovery for the captured source.
 func (s *swornMilter) discover() (discover.Result, error) {

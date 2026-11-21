@@ -178,9 +178,11 @@ smtpd_milters = { inet:127.0.0.1:10025, default_action=accept }
   comments), and any field containing a MIME encoded-word is removed outright,
   so oddly spelled forgeries go too.
 - **Discovery runs once per connection**, at its first message, and the
-  outcome is stamped on every message that connection carries. A `temperror`
-  is the exception: it is not kept, and the next message tries again, so a
-  DNS failure never outlasts itself.
+  outcome is stamped on every message that connection carries, for up to
+  five minutes; a connection held open longer is looked up again, so a
+  withdrawn attestation does not outlive the connection that saw it. A
+  `temperror` is never kept: the next message tries again, so a DNS failure
+  never outlasts itself.
 - **DNS goes through Go's own resolver**, querying the nameservers in
   `/etc/resolv.conf` directly, not through the system's `getaddrinfo`.
   Telling "no such record" (`none`) from a failed lookup (`temperror`) then

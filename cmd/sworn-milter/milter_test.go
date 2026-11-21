@@ -386,3 +386,38 @@ func TestConnectWithoutAnAddressForgetsThePreviousSource(t *testing.T) {
 		t.Errorf("connection without an address stamped %q, want %q", got, want)
 	}
 }
+
+// A connection can stay open for a long time. If the operator withdraws its
+// prefix meanwhile, a pass kept for the life of the connection would go on
+// vouching for a sender the operator no longer stands behind, for as long as
+// the sender chose to hold the connection open.
+func TestKeptOutcomeExpires(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	r := &scriptedResolver{fakeResolver: fakeResolver{txt: attestedTXT}}
+	m := scriptedMilter(r)
+	m.now = func() time.Time { return clock }
+
+	if got := m.evaluate(); !strings.Contains(got, "sworn=pass") {
+		t.Fatalf("attested source stamped %q, want sworn=pass", got)
+	}
+	// The operator withdraws: its records are gone.
+	r.fakeResolver = fakeResolver{}
+	settled := r.lookups
+
+	clock = clock.Add(outcomeMaxAge - time.Second)
+	if got := m.evaluate(); !strings.Contains(got, "sworn=pass") || r.lookups != settled {
+		t.Fatalf("inside the window: stamped %q with %d more lookups, want the kept pass and none", got, r.lookups-settled)
+	}
+	clock = clock.Add(time.Second)
+	if got, want := m.evaluate(), "mx.example; sworn=none"; got != want {
+		t.Fatalf("after the window: stamped %q, want %q", got, want)
+	}
+	if r.lookups == settled {
+		t.Fatal("after the window: no new lookup was made")
+	}
+	// The fresh outcome is kept in turn.
+	again := r.lookups
+	if got := m.evaluate(); !strings.Contains(got, "sworn=none") || r.lookups != again {
+		t.Fatalf("fresh outcome not kept: %q, %d more lookups", got, r.lookups-again)
+	}
+}
