@@ -161,6 +161,18 @@ type caseT struct {
 	policy string
 }
 
+// setup derives the fixed signing key and the encoder the corpus is built
+// with.
+func setup() {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	priv = ed25519.NewKeyFromSeed(seed)
+	pub = priv.Public().(ed25519.PublicKey)
+	detEnc, _ = cbor.CoreDetEncOptions().EncMode()
+}
+
 func main() {
 	rustBin := flag.String("rust", "", "path to the rust difftest binary (required)")
 	fuzzN := flag.Int("fuzz", 3000, "number of byte-level fuzz cases")
@@ -173,15 +185,14 @@ func main() {
 		os.Exit(2)
 	}
 
-	seed := make([]byte, ed25519.SeedSize)
-	for i := range seed {
-		seed[i] = byte(i + 1)
-	}
-	priv = ed25519.NewKeyFromSeed(seed)
-	pub = priv.Public().(ed25519.PublicKey)
-	detEnc, _ = cbor.CoreDetEncOptions().EncMode()
+	setup()
 
 	cases := generate(*fuzzN)
+	// Results are keyed by case name on both sides. Two cases under one name
+	// would be compared as one, and the other would pass unexamined.
+	if dups := repeated(caseNames(cases)); len(dups) > 0 {
+		fatal("corpus has duplicate case names: " + summarize(dups))
+	}
 
 	// Go evaluation.
 	type result struct{ authres, reason, op, unit, observed string }
@@ -230,6 +241,7 @@ func main() {
 		os.Exit(1)
 	}
 	rustRes := make(map[string]result, len(cases))
+	var answered []string
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
@@ -242,6 +254,25 @@ func main() {
 			r.op, r.unit, r.observed = f[3], f[4], f[5]
 		}
 		rustRes[f[0]] = r
+		answered = append(answered, f[0])
+	}
+	// The other side's output is evidence, and a run that lost part of it has
+	// compared nothing for the part it lost. Each of these used to end in a
+	// report on whatever happened to be read.
+	if err := sc.Err(); err != nil {
+		fatal("reading the rust binary's output: " + err.Error())
+	}
+	if dups := repeated(answered); len(dups) > 0 {
+		fatal("rust binary returned more than one result for: " + summarize(dups))
+	}
+	var unanswered []string
+	for _, c := range cases {
+		if _, ok := rustRes[c.name]; !ok {
+			unanswered = append(unanswered, c.name)
+		}
+	}
+	if len(unanswered) > 0 {
+		fatal("rust binary returned no result for: " + summarize(unanswered))
 	}
 
 	// Compare.
@@ -282,14 +313,53 @@ func main() {
 	}
 
 	if *reportPath != "" {
-		writeReport(*reportPath, summary, cases, divergences, advisory, reasonExact)
+		// A report that was asked for and not written is a failed run: the
+		// caller is about to read a stale file, or none, as this result.
+		if err := writeReport(*reportPath, summary, cases, divergences, advisory, reasonExact); err != nil {
+			fatal("writing report: " + err.Error())
+		}
 	}
 	if len(divergences) > 0 {
 		os.Exit(1)
 	}
 }
 
-func writeReport(path, summary string, cases []caseT, divergences, advisory []string, reasonExact int) {
+// fatal ends a run that cannot vouch for its own comparison.
+func fatal(msg string) {
+	fmt.Fprintln(os.Stderr, "difftest:", msg)
+	os.Exit(1)
+}
+
+func caseNames(cases []caseT) []string {
+	names := make([]string, len(cases))
+	for i, c := range cases {
+		names[i] = c.name
+	}
+	return names
+}
+
+// repeated returns each name that occurs more than once, in first-seen order.
+func repeated(names []string) []string {
+	count := make(map[string]int, len(names))
+	var dups []string
+	for _, n := range names {
+		if count[n]++; count[n] == 2 {
+			dups = append(dups, n)
+		}
+	}
+	return dups
+}
+
+// summarize lists names for an error message, cut short past the first few.
+func summarize(names []string) string {
+	const show = 10
+	if len(names) <= show {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(names[:show], ", "), len(names)-show)
+}
+
+func writeReport(path, summary string, cases []caseT, divergences, advisory []string, reasonExact int) error {
 	var b strings.Builder
 	b.WriteString("# Gate B — Go/Rust differential report\n\n")
 	b.WriteString("Mechanical differential: every case verified by both `swornmail-go` and the independent Rust verifier. Cases carrying a policy record run the complete path (local checks, policy authorization, signature); the rest run the signature-only primitive the frozen token vectors use. A disagreement on the Authentication-Results value, or on operator/unit/observed-unit, is a finding. Reason-string differences among rejections are advisory (draft leaves reason-code order unspecified) and are tallied, not failed.\n\n")
@@ -312,5 +382,5 @@ func writeReport(path, summary string, cases []caseT, divergences, advisory []st
 		b.WriteString("\n")
 	}
 	fmt.Fprintf(&b, "Corpus: %d cases (valid parameter space, structural/header adversarial, unvectored judgment calls, and deterministic byte-fuzz). Exact-reason agreement %d/%d.\n", len(cases), reasonExact, len(cases))
-	_ = os.WriteFile(path, []byte(b.String()), 0o644)
+	return os.WriteFile(path, []byte(b.String()), 0o644)
 }

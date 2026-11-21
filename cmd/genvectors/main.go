@@ -1032,11 +1032,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "create:", err)
 		os.Exit(1)
 	}
-	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(v); err != nil {
 		fmt.Fprintln(os.Stderr, "encode:", err)
+		os.Exit(1)
+	}
+	// Close is where a deferred write error surfaces (a full disk, a failing
+	// network mount). Ignoring it would report "wrote" for a truncated vector
+	// file, and this file is the one the freeze gate compares.
+	if err := f.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "close:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("wrote %s (%d cases, %d records, %d authorization, base token=%d bytes)\n",

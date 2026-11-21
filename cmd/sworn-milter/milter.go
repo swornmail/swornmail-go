@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
@@ -11,7 +12,7 @@ import (
 	"github.com/swornmail/swornmail-go/sworn/discover"
 )
 
-// swornMilter runs Mode-1 discovery for each connection and stamps an
+// swornMilter runs Mode-1 discovery once for each connection and stamps an
 // Authentication-Results `sworn=` result. It is strictly fail-open: any error
 // yields a `none`/`temperror` result and the message is always accepted —
 // SwornMail never rejects mail by itself.
@@ -24,6 +25,9 @@ type swornMilter struct {
 
 	source     netip.Addr
 	haveSource bool
+	// outcome is the connection's Authentication-Results value once discovery
+	// has settled on one; empty until then. See evaluate.
+	outcome string
 	// stripIdx holds the per-name (1-based) positions of inbound
 	// Authentication-Results fields that claim our authserv-id and must be
 	// removed at the trust boundary (RFC 8601 §5). Both are per message and
@@ -45,6 +49,11 @@ func newServer(authservID string, r discover.Resolver, dnsTimeout time.Duration,
 }
 
 func (s *swornMilter) Connect(host, family string, port uint16, addr net.IP, _ *milter.Modifier) (milter.Response, error) {
+	// An outcome belongs to the address it was discovered for, and so does
+	// the address itself: a connection whose address cannot be read must not
+	// inherit the previous one's.
+	s.outcome = ""
+	s.haveSource = false
 	if a, ok := netip.AddrFromSlice(addr); ok {
 		s.source, s.haveSource = a.Unmap(), true
 	}
@@ -84,13 +93,35 @@ func (s *swornMilter) Body(m *milter.Modifier) (milter.Response, error) {
 	return milter.RespContinue, nil
 }
 
-// evaluate runs discovery for the captured source and formats the AR value.
+// evaluate returns the Authentication-Results value for the connection. The
+// outcome depends only on the connecting address, so discovery runs at the
+// first message and every later message on the connection is stamped with
+// what it found: a sender pushing a thousand messages down one connection
+// would otherwise cost up to ten thousand lookups for one answer.
+//
+// A temperror is the exception and is never kept. It says discovery could
+// not finish, not what the answer is, and a temporary DNS failure must not
+// become a lasting verdict: pinned, one dropped query would stand in for the
+// operator's attestation on every later message of a long-lived connection.
+// The next message tries again.
 func (s *swornMilter) evaluate() string {
+	if s.outcome != "" {
+		return s.outcome
+	}
+	res, err := s.discover()
+	value := discover.AuthResults(s.authservID, res, err)
+	if !errors.Is(err, discover.ErrTemp) {
+		s.outcome = value
+	}
+	return value
+}
+
+// discover runs discovery for the captured source.
+func (s *swornMilter) discover() (discover.Result, error) {
 	if !s.haveSource {
-		return discover.AuthResults(s.authservID, discover.Result{}, discover.ErrNone)
+		return discover.Result{}, discover.ErrNone
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.dnsTimeout)
 	defer cancel()
-	res, err := discover.Discover(ctx, s.resolver, s.source, discover.Options{IneligiblePrefixes: s.ineligible})
-	return discover.AuthResults(s.authservID, res, err)
+	return discover.Discover(ctx, s.resolver, s.source, discover.Options{IneligiblePrefixes: s.ineligible})
 }

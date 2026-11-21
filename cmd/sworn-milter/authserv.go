@@ -5,6 +5,35 @@ import (
 	"strings"
 )
 
+// authservIDRule states validAuthservID in operator terms, for error output.
+const authservIDRule = "it must be a non-empty RFC 2045 token, such as a hostname: " +
+	"printable ASCII with no spaces and none of ( ) < > @ , ; : \\ \" / [ ] ? ="
+
+// validAuthservID reports whether id can be stamped and matched. The id is
+// written unquoted at the head of every field this milter adds, so it has to
+// be an RFC 2045 token (RFC 8601 section 2.2), and it is what inbound fields
+// are compared against.
+//
+// An empty id is the dangerous case, not just an untidy one. sameID never
+// matches an empty id, so no forged inbound result would be removed, and the
+// field stamped would begin "; sworn=...", which a consumer may read as
+// having no authserv-id or skip altogether, leaving the forged field as the
+// only one it trusts. An id of a single dot compares as empty for the same
+// reason. Whitespace, a ';' or a parenthesis would end the id early or open
+// a comment, so the stamped field would claim a different id from the one
+// being stripped; a control character could break the header itself.
+func validAuthservID(id string) bool {
+	if strings.TrimSuffix(id, ".") == "" {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if !isTokenByte(id[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // claimsID reports whether an inbound Authentication-Results value could be
 // read as carrying our authserv-id. The sender picks every byte, and parsers
 // downstream don't agree on whitespace, comments, escapes or where the id

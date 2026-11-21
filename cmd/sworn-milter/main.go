@@ -44,29 +44,41 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sworn-milter: --listen must be tcp:host:port or unix:/path")
 		os.Exit(2)
 	}
-	if network == "unix" {
-		_ = os.Remove(address) // clear a stale socket
+	// Checked before anything listens: with an unusable id the milter would
+	// run, look healthy, and protect nothing.
+	if !validAuthservID(*authservID) {
+		fmt.Fprintf(os.Stderr, "sworn-milter: --authserv-id %q is not usable: %s\n", *authservID, authservIDRule)
+		os.Exit(2)
 	}
-	ln, err := net.Listen(network, address)
+	ln, release, err := listenOn(network, address)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sworn-milter: listen:", err)
 		os.Exit(1)
 	}
 
-	server := newServer(*authservID, net.DefaultResolver, *dnsTimeout, []netip.Prefix(ineligible))
+	// The pure-Go resolver, not whatever the platform's libc offers. Discovery
+	// turns on telling NXDOMAIN (no record: none) from SERVFAIL or a timeout
+	// (temperror), and a temporary failure must never read as "no
+	// attestation". Through getaddrinfo and friends that distinction depends
+	// on the libc, its NSS modules and any caching daemon behind them, which
+	// can hand back a failed lookup as "not found". PreferGo keeps the
+	// classification the same on every host this runs on.
+	resolver := &net.Resolver{PreferGo: true}
+	server := newServer(*authservID, resolver, *dnsTimeout, []netip.Prefix(ineligible))
 
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
+		// The socket goes first: Serve returns as soon as the server
+		// closes, and main may exit before anything after Close runs.
+		release()
 		_ = server.Close()
-		if network == "unix" {
-			_ = os.Remove(address)
-		}
 	}()
 
 	fmt.Fprintf(os.Stderr, "sworn-milter: listening on %s (authserv-id %s)\n", *listen, *authservID)
 	if err := server.Serve(ln); err != nil && err != milter.ErrServerClosed {
+		release()
 		fmt.Fprintln(os.Stderr, "sworn-milter: serve:", err)
 		os.Exit(1)
 	}

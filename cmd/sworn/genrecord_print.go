@@ -108,7 +108,10 @@ func notes(o genOptions, shortestPrefix, policyLen int) []string {
 		out = append(out, "t=y is NOT set: publishing this accepts accountability for every address in\n"+
 			"the listed prefixes, including sub-allocations whose PTRs you do not control.")
 	}
-	if d := ruaDomain(o.RUA); d != "" && d != o.Domain && !strings.HasSuffix(d, "."+o.Domain) {
+	// DNS names compare case-insensitively: Reports@Mailer.Example.COM is
+	// inside mailer.example.com, and telling its operator to publish a
+	// cross-domain consent record would send them after a record nobody needs.
+	if d, own := strings.ToLower(ruaDomain(o.RUA)), strings.ToLower(o.Domain); d != "" && d != own && !strings.HasSuffix(d, "."+own) {
 		out = append(out, fmt.Sprintf("the rua mailbox is outside %s, so receivers must confirm consent before\n"+
 			"sending anything: %s has to publish\n"+
 			"  %s._report.%s.%s. IN TXT \"v=%s\"",

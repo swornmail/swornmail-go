@@ -223,3 +223,166 @@ func TestHeaderTracksOwnAuthservID(t *testing.T) {
 		t.Errorf("stripIdx = %v, want [2 3]", m.stripIdx)
 	}
 }
+
+// An empty authserv-id is not a cosmetic problem: nothing compares equal to
+// it, so no forged inbound result is ever removed, and the field we stamp
+// starts with ";". Anything that would end the id early or open a comment
+// makes the stamped id differ from the one being stripped. All of them must
+// be refused at startup.
+func TestValidAuthservID(t *testing.T) {
+	for _, id := range []string{"mx.example", "mx.example.com.", "MX-1.example.com", "sworn", "relay_7", "xn--mnchen-3ya.example"} {
+		if !validAuthservID(id) {
+			t.Errorf("validAuthservID(%q) = false, want true", id)
+		}
+	}
+	for name, id := range map[string]string{
+		"empty":             "",
+		"only a dot":        ".",
+		"space":             "mx example",
+		"only a space":      " ",
+		"leading space":     " mx.example",
+		"trailing newline":  "mx.example\n",
+		"CRLF injection":    "mx.example\r\nX-Injected: yes",
+		"tab":               "mx\texample",
+		"NUL":               "mx.example\x00",
+		"DEL":               "mx.example\x7f",
+		"semicolon":         "mx.example;",
+		"result smuggled":   "mx.example;sworn=pass",
+		"comment":           "mx.example(c)",
+		"closing paren":     "mx.example)",
+		"quoted":            `"mx.example"`,
+		"slash":             "mx.example/1",
+		"encoded-word":      "=?utf-8?q?mx.example?=",
+		"non-ASCII":         "m\u00fcnchen.example",
+		"no-break space":    "mx\u00a0example",
+		"vertical tab":      "mx.example\v",
+		"backslash":         `mx\.example`,
+		"at sign":           "postmaster@mx.example",
+		"equals":            "mx=example",
+		"IPv6 literal form": "[2001:db8::1]",
+	} {
+		if validAuthservID(id) {
+			t.Errorf("%s: validAuthservID(%q) = true, want false", name, id)
+		}
+	}
+}
+
+// Every id that passes the startup check must be recognised when it comes
+// back in an inbound field, or stripping would be silently off for it.
+func TestValidAuthservIDsAreStripped(t *testing.T) {
+	for _, id := range []string{"mx.example", "mx.example.com.", "MX-1.example.com", "relay_7", "a", "a.", "!#$%&'*+-.^_`{|}~"} {
+		if !validAuthservID(id) {
+			t.Errorf("validAuthservID(%q) = false, want true", id)
+			continue
+		}
+		m := &swornMilter{authservID: id}
+		m.Header("Authentication-Results", id+"; sworn=pass policy.op=victim.example", nil)
+		if len(m.stripIdx) != 1 {
+			t.Errorf("a forged result under our own id %q was not stripped", id)
+		}
+	}
+}
+
+// scriptedResolver counts TXT lookups and fails the first failures of them
+// the way a resolver that could not get an answer does.
+type scriptedResolver struct {
+	fakeResolver
+	failures int
+	lookups  int
+}
+
+func (r *scriptedResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	r.lookups++
+	if r.failures > 0 {
+		r.failures--
+		return nil, &net.DNSError{Err: "server misbehaving", Name: name, IsTemporary: true}
+	}
+	return r.fakeResolver.LookupTXT(ctx, name)
+}
+
+func scriptedMilter(r *scriptedResolver) *swornMilter {
+	m := milterWith(nil, rev64src)
+	m.resolver = r
+	return m
+}
+
+// The outcome depends only on the connecting address, so discovery runs once
+// per connection, not once per message.
+func TestOutcomeIsReusedAcrossMessages(t *testing.T) {
+	for name, txt := range map[string]map[string][]string{
+		"pass": attestedTXT,
+		"none": nil,
+	} {
+		r := &scriptedResolver{fakeResolver: fakeResolver{txt: txt}}
+		m := scriptedMilter(r)
+		first := m.evaluate()
+		after := r.lookups
+		if after == 0 {
+			t.Fatalf("%s: the first message did no discovery", name)
+		}
+		for i := 2; i <= 4; i++ {
+			if got := m.evaluate(); got != first {
+				t.Errorf("%s: message %d stamped %q, the first %q", name, i, got, first)
+			}
+		}
+		if r.lookups != after {
+			t.Errorf("%s: later messages issued %d more lookups, want none", name, r.lookups-after)
+		}
+	}
+}
+
+// DNS-disruption attack: a temporary failure must never become a lasting
+// verdict. If the temperror from one dropped query were kept, whoever can
+// disturb the resolver for a moment would erase the operator's attestation
+// for every later message on the connection. It is retried instead, and the
+// answer it then gets is the one that is kept.
+func TestTemperrorIsRetriedNotPinned(t *testing.T) {
+	r := &scriptedResolver{fakeResolver: fakeResolver{txt: attestedTXT}, failures: 2}
+	m := scriptedMilter(r)
+	for i := 1; i <= 2; i++ {
+		if got, want := m.evaluate(), "mx.example; sworn=temperror"; got != want {
+			t.Fatalf("message %d during the outage stamped %q, want %q", i, got, want)
+		}
+	}
+	if r.lookups != 2 {
+		t.Fatalf("%d lookups during the outage, want one attempt per message", r.lookups)
+	}
+	if got := m.evaluate(); !strings.Contains(got, "sworn=pass") {
+		t.Fatalf("after the outage stamped %q, want sworn=pass", got)
+	}
+	settled := r.lookups
+	if got := m.evaluate(); !strings.Contains(got, "sworn=pass") || r.lookups != settled {
+		t.Errorf("once settled: stamped %q with %d more lookups, want the kept pass and none", got, r.lookups-settled)
+	}
+}
+
+// An outcome belongs to the address it was found for. If a milter value ever
+// sees a second Connect, the first address's result must not carry over.
+func TestConnectDiscardsTheOutcome(t *testing.T) {
+	m := milterWith(attestedTXT, rev64src)
+	if got := m.evaluate(); !strings.Contains(got, "sworn=pass") {
+		t.Fatalf("attested source stamped %q, want sworn=pass", got)
+	}
+	if _, err := m.Connect("other.example", "tcp6", 25, net.ParseIP("2001:db8:bad::1"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := m.evaluate(), "mx.example; sworn=none"; got != want {
+		t.Errorf("unattested source after Connect stamped %q, want %q", got, want)
+	}
+}
+
+// A connection whose address cannot be read (a unix-domain or unknown
+// family) has no source. It must be stamped none, not with the result of
+// the address the previous Connect carried.
+func TestConnectWithoutAnAddressForgetsThePreviousSource(t *testing.T) {
+	m := milterWith(attestedTXT, rev64src)
+	if got := m.evaluate(); !strings.Contains(got, "sworn=pass") {
+		t.Fatalf("attested source stamped %q, want sworn=pass", got)
+	}
+	if _, err := m.Connect("localhost", "unix", 0, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := m.evaluate(), "mx.example; sworn=none"; got != want {
+		t.Errorf("connection without an address stamped %q, want %q", got, want)
+	}
+}

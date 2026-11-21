@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -24,27 +25,67 @@ const (
 // writePrivateKey writes priv to path with owner-only permissions. Without
 // force an existing file is never touched: silently destroying a signing key
 // would revoke every token the operator has issued under that selector.
+//
+// With force the new key is written to a temporary file beside path and
+// renamed over it, so the old key is replaced in one step or not at all.
+// Opening path itself to truncate it did two things an operator would not
+// expect of a key tool. A write that failed part-way (a full disk is enough)
+// left neither key. And a symbolic link at path was followed, so the private
+// key landed in whatever file the link named, which someone else with write
+// access to the directory could have chosen. rename(2) replaces the link.
 func writePrivateKey(path string, priv ed25519.PrivateKey, force bool) error {
 	der, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		return err
 	}
-	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-	if force {
-		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	}
-	f, err := os.OpenFile(path, flags, keyFilePerm)
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("%s already exists; refusing to overwrite a signing key (pass --force to replace it)", path)
+	block := &pem.Block{Type: pemTypePrivate, Bytes: der}
+	if !force {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, keyFilePerm)
+		if err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("%s already exists; refusing to overwrite a signing key (pass --force to replace it)", path)
+			}
+			return err
 		}
+		if err := writeKeyFile(f, block); err != nil {
+			// O_EXCL means this run created the file, so a truncated key
+			// is ours to take away again.
+			_ = os.Remove(path)
+			return err
+		}
+		return nil
+	}
+	// os.CreateTemp opens with O_EXCL and mode 0600, in the destination's
+	// own directory so the rename never crosses a filesystem.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	// O_CREATE leaves the mode of an existing file alone, so --force must
-	// re-tighten permissions itself.
-	err = f.Chmod(keyFilePerm)
+	if err := writeKeyFile(tmp, block); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	return nil
+}
+
+// encodeKeyPEM is pem.Encode, held in a variable so a test can make the
+// write fail part-way.
+var encodeKeyPEM = pem.Encode
+
+// writeKeyFile writes block to f, flushes it to stable storage and closes f.
+// The mode is set explicitly rather than left to the creating call: a umask
+// can only narrow it, but nothing here should depend on that.
+func writeKeyFile(f *os.File, block *pem.Block) error {
+	err := f.Chmod(keyFilePerm)
 	if err == nil {
-		err = pem.Encode(f, &pem.Block{Type: pemTypePrivate, Bytes: der})
+		err = encodeKeyPEM(f, block)
+	}
+	if err == nil {
+		err = f.Sync()
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/swornmail/swornmail-go/sworn"
 )
@@ -24,11 +25,24 @@ func cmdRecord(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: sworn record <domain> [--selector <sel>] [--json]")
 		return 2
 	}
-	domain := domainArg
+	// Both values become DNS query names, so they are held to the protocol's
+	// own syntax before anything is sent: a typo, a URL, or a string with a
+	// newline in it should be named as the mistake it is, not turned into a
+	// lookup for some other name and reported as a missing record.
+	if !sworn.ValidDomain(domainArg) {
+		fmt.Fprintf(os.Stderr, "sworn: invalid domain %q: %s\n", domainArg, domainRule)
+		return 2
+	}
+	if *selector != "" && !sworn.ValidSelector(*selector) {
+		fmt.Fprintf(os.Stderr, "sworn: invalid --selector %q: %s\n", *selector, selectorRule)
+		return 2
+	}
+	// Lower case, as the verifier canonicalises both names before it queries.
+	domain := strings.ToLower(domainArg)
 	out := recordOutput{Domain: domain}
 
 	if *selector != "" {
-		out.Key = lintKey(*selector, domain)
+		out.Key = lintKey(strings.ToLower(*selector), domain)
 	}
 	out.Policy = lintPolicy(domain)
 

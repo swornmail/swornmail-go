@@ -153,12 +153,22 @@ func decodeToken(s string) ([]byte, error) {
 	return nil, fmt.Errorf("token is not valid base64url")
 }
 
+// decodeKey reads a public key given outside DNS (--key, or a file holding
+// the bare base64) under the rule a published pk= value is held to: strict
+// padded base64 of exactly 32 octets that decode as a curve point. It goes
+// through the record parser instead of restating that rule, so the offline
+// path cannot accept a key no receiver would accept from the operator's key
+// record. A lenient decoder here once did: `sworn verify --key` passed with a
+// spelling of the key that fails as key_record_invalid when published.
 func decodeKey(s string) (ed25519.PublicKey, error) {
-	raw, err := base64.StdEncoding.DecodeString(s)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("expected %d-byte base64 Ed25519 key", ed25519.PublicKeySize)
+	rec, err := sworn.ParseRecord("v=" + sworn.Version + "; k=ed25519; pk=" + s)
+	// Strict base64 has one spelling per key, so comparing against it also
+	// refuses input the record parser would read as more than a pk= value:
+	// surrounding whitespace, or a ';' that starts another tag.
+	if err != nil || encodePublicKey(rec.PublicKey) != s {
+		return nil, fmt.Errorf("expected a %d-byte Ed25519 public key in padded base64, as in a pk= record value", ed25519.PublicKeySize)
 	}
-	return ed25519.PublicKey(raw), nil
+	return rec.PublicKey, nil
 }
 
 type recordLookupError struct {
