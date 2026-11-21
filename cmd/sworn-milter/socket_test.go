@@ -151,21 +151,37 @@ func TestListenOnRefusesALiveSocket(t *testing.T) {
 	_ = conn.Close()
 }
 
-// On shutdown only the socket this process created is removed. If the path
-// has been taken over since, what is there now belongs to someone else.
-func TestReleaseLeavesASocketItDidNotCreate(t *testing.T) {
+// Closing the listener must not unlink the path by name: by then the path may
+// hold something else.
+func TestCloseDoesNotUnlinkByName(t *testing.T) {
 	path := filepath.Join(socketDir(t), "s")
 	ln, release, err := listenOn("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Closing must not unlink by name either.
+	defer release()
 	if err := ln.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(path); err != nil {
 		t.Fatalf("closing the listener removed the socket by name: %v", err)
 	}
+}
+
+// On shutdown only the socket this process created is removed. If the path
+// has been taken over since, what is there now belongs to someone else.
+//
+// The first listener stays open while the path is replaced, as it is in the
+// milter, which releases before it closes. That also keeps the first
+// socket's inode in use, so the replacement cannot be handed the same one
+// and be mistaken for it.
+func TestReleaseLeavesASocketItDidNotCreate(t *testing.T) {
+	path := filepath.Join(socketDir(t), "s")
+	ln, release, err := listenOn("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
 
 	// Someone else replaces the path.
 	if err := os.Remove(path); err != nil {
